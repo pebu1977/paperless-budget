@@ -21,6 +21,8 @@
       <button data-view="review">Erfassen <span id="reviewBadge" class="badge" hidden></span></button>
       <button data-view="bank">Abgleich <span id="bankBadge" class="badge" hidden></span></button>
       <button data-view="vehicles">Fahrzeuge</button>
+      <button data-view="realestate">Immobilien</button>
+      <button data-view="projects">Projekte</button>
       <button data-view="income">Einnahmen</button>
       <button data-view="settings">Einstellungen</button>
     </nav>
@@ -59,6 +61,23 @@
       </div>
 
       <div class="card">
+        <div class="cardhead">
+          <h3>Ausgaben im Monat</h3>
+          <div class="row">
+            <input id="ovSearch" type="search" placeholder="Suchen …">
+            <select id="ovFilter">
+              <option value="in">Im Budget</option>
+              <option value="all">Alle</option>
+              <option value="out">Nicht berücksichtigt</option>
+            </select>
+          </div>
+        </div>
+        <p class="muted small">Zweck wird aus der Rechnung gelesen (✎ zum Korrigieren). Häkchen entfernen = im Budget nicht berücksichtigen.</p>
+        <div id="ovItems" class="items"></div>
+        <div class="row" style="justify-content:center;margin-top:8px"><button id="ovMore" class="linkbtn" hidden>alle anzeigen</button></div>
+      </div>
+
+      <div class="card">
         <h3>Verlauf (12 Monate)</h3>
         <div class="chartbox"><canvas id="trendChart"></canvas></div>
       </div>
@@ -69,13 +88,13 @@
       <div class="card">
         <div class="cardhead">
           <h3>Ausgaben im Monat</h3>
-          <select id="expFilter"></select>
+          <div class="row"><input id="expSearch" type="search" placeholder="Suchen …"><select id="expFilter"></select></div>
         </div>
         <div class="tablewrap">
           <table class="table">
-            <thead><tr><th>Datum</th><th>Dokument</th><th>Korrespondent</th><th>Kategorie</th><th class="num">Betrag</th></tr></thead>
+            <thead><tr><th title="Im Budget berücksichtigen">✓</th><th>Datum</th><th>Dokument / Zweck</th><th>Korrespondent</th><th>Kategorie</th><th class="num">Betrag</th></tr></thead>
             <tbody id="expBody"></tbody>
-            <tfoot><tr><td colspan="4">Total</td><td class="num" id="expTotal"></td></tr></tfoot>
+            <tfoot><tr><td colspan="5">Total <span class="muted small" id="expTotalNote"></span></td><td class="num" id="expTotal"></td></tr></tfoot>
           </table>
         </div>
         <p class="muted small">Änderungen an Kategorie und Betrag werden sofort in Paperless gespeichert.</p>
@@ -185,6 +204,42 @@
       </div>
     </section>
 
+    <!-- Immobilien -->
+    <section id="view-realestate" class="view" hidden>
+      <div class="cardhead" style="margin-bottom:12px">
+        <div class="row">
+          <select id="reProp"></select>
+          <button id="reAddProp">+ Haus</button>
+          <select id="reYear" title="Abrechnungsperiode"></select>
+        </div>
+        <nav class="subtabs" id="reTabs">
+          <button data-sub="overview" class="active">Übersicht</button>
+          <button data-sub="costs">Kosten</button>
+          <button data-sub="rent">Mieten</button>
+          <button data-sub="statement">Abrechnung</button>
+          <button data-sub="setup">Einrichtung</button>
+        </nav>
+      </div>
+      <div id="reEmpty" class="card hint" hidden>Noch kein Haus angelegt – oben auf <b>+ Haus</b> klicken.</div>
+      <div id="reBody"></div>
+    </section>
+
+    <!-- Projekte -->
+    <section id="view-projects" class="view" hidden>
+      <div class="grid2">
+        <div class="card">
+          <div class="cardhead"><h3>Projekte</h3><button id="prAdd">+ Projekt</button></div>
+          <p class="muted small">Belege über einen Paperless-Tag (ganz) oder in der App (ganz oder Teilbetrag) zuordnen.
+            „Nicht im Haushaltsbudget“ = zugeordnete Beträge zählen nicht zum Haushalt (z.B. Geschäft).</p>
+          <div id="prList"></div>
+        </div>
+        <div class="card" id="prDetailCard">
+          <div class="cardhead"><h3 id="prTitle">Projekt wählen</h3><button id="prSearch" hidden>+ Belege zuordnen</button></div>
+          <div id="prDetail" class="muted small">Links ein Projekt anklicken.</div>
+        </div>
+      </div>
+    </section>
+
     <!-- Einnahmen -->
     <section id="view-income" class="view" hidden>
       <div class="grid2">
@@ -232,6 +287,11 @@
         <div id="catSettings" class="catsettings"></div>
       </div>
       <div class="card">
+        <h3>Nie im Budget berücksichtigen</h3>
+        <p class="muted small">Dokumente mit diesen Paperless-Tags zählen nie zum Budget (z.B. „Geschäft“). Einzelne Belege schliesst du direkt über das Häkchen aus.</p>
+        <div id="exclTags" class="chips"></div>
+      </div>
+      <div class="card">
         <h3>„Erfassen“-Ansicht eingrenzen</h3>
         <p class="muted small">Welche Dokumente ohne Betrag sollen zum Nacherfassen erscheinen? Nichts gewählt = alle Dokumente des Monats.</p>
         <div class="grid2 tight">
@@ -262,7 +322,53 @@
     </section>
   </main>
 
+  <dialog id="dlg">
+    <form method="dialog" class="form" id="dlgForm">
+      <h3 id="dlgTitle"></h3>
+      <div class="muted small" id="dlgSub"></div>
+      <label><span id="dlgLabel"></span><input id="dlgInput" list="dlgList" autocomplete="off"></label>
+      <datalist id="dlgList"></datalist>
+      <div id="dlgChips" class="chips"></div>
+      <div class="row" style="justify-content:flex-end">
+        <button type="button" id="dlgExtra" class="linkbtn" hidden></button>
+        <button value="cancel" formnovalidate>Abbrechen</button>
+        <button value="ok" class="primary" id="dlgOk">OK</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="allocDlg">
+    <div class="form">
+      <h3>Zuordnen</h3>
+      <div class="muted small" id="alSub"></div>
+      <div id="alExisting"></div>
+      <h4 style="margin-top:8px">Neue Zuordnung</h4>
+      <label>Ziel<select id="alTarget"></select></label>
+      <div class="row" id="alPropFields">
+        <label>Kostenart<select id="alCat"></select></label>
+        <label>Wohnung<select id="alUnit"></select></label>
+      </div>
+      <div class="row">
+        <label>Anteil<select id="alMode"><option value="percent">Prozent</option><option value="amount">Betrag CHF</option></select></label>
+        <label>Wert<input id="alValue" type="number" step="0.01" value="100"></label>
+        <label id="alQtyWrap">Menge<input id="alQty" type="number" step="0.01" placeholder="z.B. Liter"></label>
+      </div>
+      <label>Notiz<input id="alNote" placeholder="optional"></label>
+      <div class="row" style="justify-content:flex-end">
+        <button id="alClose">Schliessen</button>
+        <button id="alSave" class="primary">Zuordnen</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="searchDlg">
+    <div class="form">
+      <h3 id="seTitle">Belege suchen</h3>
+      <input id="seInput" type="search" placeholder="Suchbegriff (Titel, Inhalt, Händler) …">
+      <div id="seResults" class="seresults"></div>
+      <div class="row" style="justify-content:flex-end"><button id="seClose">Schliessen</button></div>
+    </div>
+  </dialog>
   <div id="toast" class="toast" hidden></div>
   <script src="app.js"></script>
+  <script src="re.js"></script>
 </body>
 </html>

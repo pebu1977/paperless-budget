@@ -179,3 +179,72 @@ label.inline input { width: 80px; text-align: right; }
 .vs-head { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; border-bottom: none; padding-bottom: 0; }
 @media (max-width: 900px) { .vs-row { grid-template-columns: 1fr 1fr; } .vs-head { display: none; } }
 .tx-act .txveh { flex: 0 1 140px; min-width: 0; }
+
+/* Zweck & nicht berücksichtigen */
+.items { display: flex; flex-direction: column; }
+.it { display: grid; grid-template-columns: 26px 78px 1fr 150px 120px; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.it:last-child { border-bottom: none; }
+.it.out, tr.out { opacity: .5; }
+.it.out .it-amt, tr.out .num { text-decoration: line-through; }
+.it-main { min-width: 0; }
+.it-purpose { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.it-purpose.none { color: var(--muted); font-weight: 400; font-style: italic; }
+.it-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.it-cat { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; }
+.it-amt { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.why { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 8px; background: var(--line); color: var(--muted); margin-left: 6px; font-weight: 400; }
+.edit { background: none; border: none; padding: 0 4px; color: var(--muted); cursor: pointer; font-size: 13px; }
+.edit:hover { color: var(--accent); }
+input[type=checkbox].budget { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+@media (max-width: 760px) { .it { grid-template-columns: 26px 1fr auto; } .it-date, .it-cat { display: none; } }
+dialog#dlg { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 20px; width: min(460px, calc(100vw - 32px)); box-shadow: 0 10px 40px rgba(0,0,0,.25); }
+dialog#dlg::backdrop { background: rgba(0,0,0,.35); }
+dialog#dlg h3 { margin: 0; }
+.rv-purpose { font-size: 13px; margin-top: 2px; }
+
+/* Immobilien & Projekte */
+.subtabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.subtabs button { background: none; border: 1px solid var(--line); border-radius: 16px; padding: 5px 12px; font-size: 13px; color: var(--muted); }
+.subtabs button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+.etable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.etable th { text-align: left; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; padding: 6px 4px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.etable td { padding: 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.etable input, .etable select, .etable textarea { width: 100%; min-width: 0; padding: 5px 7px; font-size: 13px; }
+.etable input[type=checkbox] { width: auto; }
+.etable td.num, .etable th.num { text-align: right; }
+.etable tfoot td { font-weight: 700; border-bottom: none; }
+.etable .warn { color: var(--warn); font-weight: 600; }
+.srcb { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 8px; background: var(--line); color: var(--muted); }
+.srcb.Beleg { background: #e3f2fd; color: #1565c0; } .srcb.Fix { background: #f3e5f5; color: #6a1b9a; }
+.srcb.Manuell { background: #fff3e0; color: #e65100; } .srcb.Bank { background: #eceff1; color: #455a64; }
+@media (prefers-color-scheme: dark) { .srcb.Beleg { background:#16324a; color:#90caf9 } .srcb.Fix { background:#2e1f36; color:#ce93d8 } .srcb.Manuell { background:#3a2a14; color:#ffb74d } .srcb.Bank { background:#263238; color:#b0bec5 } }
+.guess { font-size: 11px; color: var(--warn); }
+.formgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; }
+.formgrid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.formgrid label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
+.formgrid textarea { min-height: 60px; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; }
+.matrix { overflow-x: auto; }
+.matrix table { border-collapse: collapse; font-size: 12px; min-width: 100%; }
+.matrix th, .matrix td { padding: 6px 6px; text-align: center; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.matrix td.ok { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.matrix td.miss { background: #fdecea; color: var(--bad); font-weight: 600; }
+.matrix td.part { background: #fff3d6; color: #8a5d00; font-weight: 600; }
+.matrix td.na { color: var(--line); }
+@media (prefers-color-scheme: dark) { .matrix td.miss { background:#3a1d1a } .matrix td.part { background:#3b3018; color:#f1c35c } }
+.pv { font-size: 13px; }
+.pv h4 { margin: 14px 0 6px; }
+.pv table { width: 100%; border-collapse: collapse; }
+.pv td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.pv td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pv tr.tot td { font-weight: 700; }
+.pr { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+.pr.active { border-color: var(--accent); background: var(--accent-soft); }
+.pr .bar { margin-top: 6px; }
+dialog#allocDlg, dialog#searchDlg { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 20px; width: min(620px, calc(100vw - 32px)); box-shadow: 0 10px 40px rgba(0,0,0,.25); }
+dialog#allocDlg::backdrop, dialog#searchDlg::backdrop { background: rgba(0,0,0,.35); }
+.seresults { max-height: 55vh; overflow-y: auto; display: flex; flex-direction: column; }
+.seresults .invitem { cursor: default; }
+.allocs { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-left: 6px; }
+.allocb { font-size: 11px; padding: 1px 7px; border-radius: 8px; background: #efebe9; color: #5d4037; white-space: nowrap; }
+@media (prefers-color-scheme: dark) { .allocb { background: #3e2f2a; color: #d7ccc8; } }
+.tablewrap.wide .etable { min-width: 1180px; }

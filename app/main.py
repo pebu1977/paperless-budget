@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import bank, vehicles as veh
+from . import bank, purpose as purp, vehicles as veh
 
 # ---------------------------------------------------------------- Konfiguration
 PAPERLESS_URL = os.environ.get("PAPERLESS_URL", "http://paperless:8000").rstrip("/")
@@ -57,7 +57,9 @@ DEFAULT_SETTINGS = {
     "match_window_days": 60,            # Rechnung höchstens so viele Tage vor der Zahlung
     "fuel_correspondent_ids": [],       # Tankkarten-Rechnungen erkennen: Korrespondenten (z.B. Vögtlin-Meyer)
     "fuel_tag_ids": [],                 # ... oder Tags
+    "exclude_tag_ids": [],              # Dokumente mit diesen Tags nie im Budget (z.B. "Geschäft")
 }
+EXCLUDE_REASONS = ["Geschäftlich", "Rückerstattet", "Von jemand anderem bezahlt", "Doppelt erfasst", "Kein Haushaltsausgabe"]
 
 app = FastAPI(title="Paperless Budget")
 
@@ -150,6 +152,84 @@ def init_db():
             CREATE TABLE IF NOT EXISTS traccar_km (
                 device_id INTEGER NOT NULL, month TEXT NOT NULL, km REAL NOT NULL, fetched_at REAL NOT NULL,
                 PRIMARY KEY (device_id, month)
+            );
+            -- Liegenschaften
+            CREATE TABLE IF NOT EXISTS properties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT,
+                owner_name TEXT, owner_address TEXT, owner_iban TEXT,
+                start_month INTEGER NOT NULL DEFAULT 1, room_pct REAL NOT NULL DEFAULT 70,
+                room_key_id INTEGER, water_key_id INTEGER, tag_id INTEGER,
+                exclude_from_budget INTEGER NOT NULL DEFAULT 1, intro TEXT, closing TEXT, due_days INTEGER DEFAULT 30
+            );
+            CREATE TABLE IF NOT EXISTS units (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, name TEXT NOT NULL,
+                area REAL NOT NULL DEFAULT 0, owner_occupied INTEGER NOT NULL DEFAULT 0, sort INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS dist_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, name TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'percent'                -- percent | area | equal
+            );
+            CREATE TABLE IF NOT EXISTS key_shares (
+                key_id INTEGER NOT NULL, unit_id INTEGER NOT NULL, percent REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (key_id, unit_id)
+            );
+            CREATE TABLE IF NOT EXISTS cost_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, grp TEXT NOT NULL, name TEXT NOT NULL,
+                key_id INTEGER, heating INTEGER NOT NULL DEFAULT 0, unit_label TEXT, sort INTEGER DEFAULT 0,
+                keywords TEXT                                        -- automatisch zuordnen (Korrespondent/Titel/Zweck)
+            );
+            CREATE TABLE IF NOT EXISTS tenancies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, unit_id INTEGER NOT NULL, tenant_name TEXT NOT NULL,
+                tenant_address TEXT, salutation TEXT, start TEXT NOT NULL, end TEXT,
+                rent REAL NOT NULL DEFAULT 0, akonto REAL NOT NULL DEFAULT 0,
+                match_text TEXT                                      -- Stichworte im Buchungstext der Mietzahlung
+            );
+            CREATE TABLE IF NOT EXISTS fixed_costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, category_id INTEGER NOT NULL,
+                unit_id INTEGER, name TEXT, amount REAL NOT NULL, interval TEXT NOT NULL DEFAULT 'jahr',  -- jahr | monat
+                valid_from TEXT, valid_to TEXT
+            );
+            CREATE TABLE IF NOT EXISTS manual_costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, category_id INTEGER NOT NULL,
+                unit_id INTEGER, date TEXT NOT NULL, description TEXT, amount REAL NOT NULL, quantity REAL
+            );
+            CREATE TABLE IF NOT EXISTS rent_payments (
+                tx_id INTEGER PRIMARY KEY, tenancy_id INTEGER NOT NULL, month TEXT NOT NULL,
+                rent_part REAL NOT NULL DEFAULT 0, akonto_part REAL NOT NULL DEFAULT 0, auto INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS nk_statements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER, unit_id INTEGER, tenancy_id INTEGER,
+                period_start TEXT, period_end TEXT, total REAL, akonto REAL, saldo REAL, created_at TEXT,
+                docx TEXT, pdf TEXT, paperless_task TEXT
+            );
+            -- Projekte
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, budget REAL, tag_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'aktiv', exclude_from_budget INTEGER NOT NULL DEFAULT 0,
+                start TEXT, end TEXT, note TEXT
+            );
+            -- Zuordnung von Belegen/Bankbuchungen (ganz oder Teil) zu Liegenschaft oder Projekt
+            CREATE TABLE IF NOT EXISTS allocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,          -- doc | tx
+                source_id INTEGER NOT NULL,
+                target_type TEXT NOT NULL,          -- property | project
+                target_id INTEGER NOT NULL,
+                category_id INTEGER, unit_id INTEGER,
+                percent REAL, amount REAL, quantity REAL, note TEXT
+            );
+            CREATE INDEX IF NOT EXISTS alloc_src ON allocations(source_type, source_id);
+            CREATE TABLE IF NOT EXISTS doc_purpose (
+                doc_id INTEGER PRIMARY KEY,
+                purpose TEXT,
+                source TEXT NOT NULL,                  -- auto | manuell | none
+                updated_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS doc_flags (
+                doc_id INTEGER PRIMARY KEY,
+                excluded INTEGER NOT NULL DEFAULT 0,   -- 1 = im Budget nicht berücksichtigen
+                reason TEXT,                           -- Grund / Zweck, z.B. "Geschäftlich"
+                updated_at TEXT
             );
             CREATE TABLE IF NOT EXISTS rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -303,7 +383,23 @@ def shift_month(d: date, n: int) -> date:
     return date(idx // 12, idx % 12 + 1, 1)
 
 
-def normalize(doc: dict, amount_field_id: Optional[int], categories: list[int]) -> dict:
+def get_flags() -> dict[int, dict]:
+    with db() as con:
+        return {r["doc_id"]: dict(r) for r in con.execute("SELECT * FROM doc_flags WHERE excluded = 1")}
+
+
+def exclusion(doc_id: int, tags: list[int], flags: dict, settings: dict, tag_names: dict) -> tuple[bool, Optional[str], str]:
+    """(ausgeschlossen?, Grund, Quelle 'manuell'|'tag'|'')"""
+    f = flags.get(doc_id)
+    if f:
+        return True, f.get("reason"), "manuell"
+    hit = next((t for t in settings.get("exclude_tag_ids") or [] if t in tags), None)
+    if hit is not None:
+        return True, tag_names.get(hit, "Tag"), "tag"
+    return False, None, ""
+
+
+def normalize(doc: dict, amount_field_id: Optional[int], categories: list[int], excl: Optional[tuple] = None) -> dict:
     amount, has_field = None, False
     for cf in doc.get("custom_fields") or []:
         if cf.get("field") == amount_field_id:
@@ -323,10 +419,144 @@ def normalize(doc: dict, amount_field_id: Optional[int], categories: list[int]) 
         "category": category,
         "url": f"{PAPERLESS_PUBLIC_URL}/documents/{doc['id']}/details",
         "content": (doc.get("content") or "")[:400] if "content" in doc else None,
+        "excluded": bool(excl and excl[0]),
+        "exclude_reason": excl[1] if excl else None,
+        "exclude_source": excl[2] if excl else "",
     }
 
 
-async def fetch_expenses(start: date, end: date) -> list[dict]:
+async def attach_purposes(docs: list[dict]) -> list[dict]:
+    """Zweck je Dokument ergänzen: aus Cache, sonst aus dem OCR-Text lesen und speichern."""
+    if not docs:
+        return docs
+    ids = [d["id"] for d in docs]
+    with db() as con:
+        q = ",".join("?" * len(ids))
+        cached = {r["doc_id"]: dict(r) for r in con.execute(f"SELECT * FROM doc_purpose WHERE doc_id IN ({q})", ids)}
+        fuel = {r["doc_id"]: r["entries"] for r in con.execute(f"SELECT doc_id, entries FROM fuel_docs WHERE doc_id IN ({q})", ids)}
+    missing = [i for i in ids if i not in cached or (i in fuel and cached[i]["source"] != "manuell")]
+    if missing:
+        found: dict[int, Optional[str]] = {}
+        need_text = [i for i in missing if i not in fuel]
+        for k in range(0, len(need_text), 50):
+            chunk = need_text[k:k + 50]
+            for d in await pl_all("/api/documents/", {"id__in": ",".join(map(str, chunk)), "fields": "id,content"}):
+                found[d["id"]] = purp.extract_purpose(d.get("content") or "")
+        for i in missing:
+            if i in fuel:
+                found[i] = f"Treibstoff · {fuel[i]} Tankvorgänge"
+        now = datetime.now().isoformat(timespec="seconds")
+        with db() as con:
+            for i in missing:
+                v = found.get(i)
+                con.execute("INSERT OR REPLACE INTO doc_purpose(doc_id, purpose, source, updated_at) VALUES (?, ?, ?, ?)",
+                            (i, v, "auto" if v else "none", now))
+                cached[i] = {"purpose": v, "source": "auto" if v else "none"}
+    for d in docs:
+        c = cached.get(d["id"]) or {}
+        d["purpose"] = c.get("purpose")
+        d["purpose_source"] = c.get("source")
+    return docs
+
+
+class PurposeIn(BaseModel):
+    purpose: Optional[str] = None
+
+
+@app.put("/api/documents/{doc_id}/purpose")
+def set_purpose(doc_id: int, body: PurposeIn):
+    v = (body.purpose or "").strip() or None
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO doc_purpose(doc_id, purpose, source, updated_at) VALUES (?, ?, 'manuell', ?)",
+                    (doc_id, v, datetime.now().isoformat(timespec="seconds")))
+    return {"doc_id": doc_id, "purpose": v, "purpose_source": "manuell"}
+
+
+@app.delete("/api/documents/{doc_id}/purpose")
+async def reset_purpose(doc_id: int):
+    """Manuellen Zweck verwerfen und neu aus der Rechnung lesen."""
+    with db() as con:
+        con.execute("DELETE FROM doc_purpose WHERE doc_id = ?", (doc_id,))
+    d = (await attach_purposes([{"id": doc_id}]))[0]
+    return {"doc_id": doc_id, "purpose": d["purpose"], "purpose_source": d["purpose_source"]}
+
+
+async def _excl_ctx() -> tuple[dict, dict, dict]:
+    meta = await get_meta()
+    return get_flags(), get_settings(), {t["id"]: t["name"] for t in meta["tags"]}
+
+
+def normalize_all(docs: list[dict], fid: int, cats: list[int], ctx: tuple) -> list[dict]:
+    flags, st, names = ctx
+    return [normalize(d, fid, cats, exclusion(d["id"], d.get("tags") or [], flags, st, names)) for d in docs]
+
+
+def alloc_targets() -> dict:
+    with db() as con:
+        return {
+            "property": {r["id"]: dict(r) for r in con.execute("SELECT id, name, tag_id, exclude_from_budget FROM properties")},
+            "project": {r["id"]: dict(r) for r in con.execute("SELECT id, name, tag_id, exclude_from_budget FROM projects")},
+        }
+
+
+def alloc_amount(a: dict, full: float) -> float:
+    if a.get("amount") is not None:
+        return round(float(a["amount"]), 2)
+    return round(full * float(a.get("percent") if a.get("percent") is not None else 100) / 100, 2)
+
+
+def attach_allocations(items: list[dict], source_type: str, amount_key: str = "amount", targets: Optional[dict] = None) -> None:
+    """items[*]['allocations'] (explizit + implizit über Tag) und ['budget_reduction'] ergänzen."""
+    if not items:
+        return
+    targets = targets or alloc_targets()
+    ids = [i["id"] for i in items]
+    with db() as con:
+        q = ",".join("?" * len(ids))
+        rows = [dict(r) for r in con.execute(
+            f"SELECT * FROM allocations WHERE source_type = ? AND source_id IN ({q})", [source_type, *ids])]
+    by_src: dict[int, list] = {}
+    for r in rows:
+        by_src.setdefault(r["source_id"], []).append(r)
+    for it in items:
+        full = float(it.get(amount_key) or 0)
+        out, explicit_targets = [], set()
+        for a in by_src.get(it["id"], []):
+            t = targets[a["target_type"]].get(a["target_id"])
+            if not t:
+                continue
+            explicit_targets.add((a["target_type"], a["target_id"]))
+            out.append({**a, "target_name": t["name"], "value": alloc_amount(a, full), "implicit": False,
+                        "excludes_budget": bool(t["exclude_from_budget"])})
+        for tt in ("property", "project"):
+            for t in targets[tt].values():
+                if t["tag_id"] and t["tag_id"] in (it.get("tags") or []) and (tt, t["id"]) not in explicit_targets:
+                    out.append({"id": None, "target_type": tt, "target_id": t["id"], "target_name": t["name"], "value": round(full, 2),
+                                "percent": 100, "amount": None, "category_id": None, "unit_id": None, "quantity": None,
+                                "implicit": True, "excludes_budget": bool(t["exclude_from_budget"])})
+        it["allocations"] = out
+        it["budget_reduction"] = round(min(full, sum(a["value"] for a in out if a["excludes_budget"])), 2)
+
+
+def apply_budget_reduction(items: list[dict], kind_label: str = "") -> None:
+    """Anteile, die einer Liegenschaft / einem Projekt 'ausserhalb des Haushaltsbudgets' gehören, abziehen."""
+    for it in items:
+        red = it.get("budget_reduction") or 0
+        if red <= 0:
+            continue
+        it["amount_full"] = it["amount"]
+        it["amount"] = round(it["amount"] - red, 2)
+        names = ", ".join(sorted({a["target_name"] for a in it["allocations"] if a["excludes_budget"]}))
+        if it["amount"] <= 0.005 and not it.get("excluded"):
+            it["amount"] = 0.0
+            it["excluded"], it["exclude_reason"], it["exclude_source"] = True, names, "alloc"
+        elif it["amount"] > 0.005:
+            it["alloc_note"] = f"ohne {red:.2f} für {names}"
+
+
+async def fetch_expenses(start: date, end: date, include_excluded: bool = False, budget_view: bool = False) -> list[dict]:
+    """Dokumente mit Betrag im Zeitraum. Standard: ohne die als 'nicht berücksichtigen' markierten.
+    budget_view: Anteile für Liegenschaften/Projekte ausserhalb des Haushaltsbudgets abziehen."""
     meta = await get_meta()
     fid = require_amount_field(meta)
     cats = get_settings()["category_tag_ids"]
@@ -340,9 +570,13 @@ async def fetch_expenses(start: date, end: date) -> list[dict]:
             "ordering": "-created",
         },
     )
-    out = [normalize(d, fid, cats) for d in docs]
+    out = normalize_all(docs, fid, cats, await _excl_ctx())
     # Datum zusätzlich lokal prüfen (robust gegenüber Zeitzonen/Versionen)
-    return [d for d in out if d["amount"] is not None and start.isoformat() <= d["date"] < end.isoformat()]
+    out = [d for d in out if d["amount"] is not None and start.isoformat() <= d["date"] < end.isoformat()]
+    attach_allocations(out, "doc")
+    if budget_view:
+        apply_budget_reduction(out)
+    return [d for d in out if include_excluded or not d["excluded"]]
 
 
 def incomes_between(start: date, end: date) -> list[dict]:
@@ -367,9 +601,9 @@ def bank_expenses(start: date, end: date, categories: list[int]) -> list[dict]:
             "SELECT * FROM transactions WHERE status = 'open' AND amount < 0 AND date >= ? AND date < ?",
             (start.isoformat(), end.isoformat()),
         ).fetchall()
-    return [
+    items = [
         {
-            "id": f"tx{r['id']}",
+            "id": r["id"],
             "title": r["text"],
             "date": r["date"],
             "amount": -r["amount"],
@@ -378,6 +612,9 @@ def bank_expenses(start: date, end: date, categories: list[int]) -> list[dict]:
         }
         for r in rows
     ]
+    attach_allocations(items, "tx")
+    apply_budget_reduction(items)
+    return [i for i in items if not i.get("excluded")]
 
 
 # ---------------------------------------------------------------- API: Meta & Setup
@@ -415,6 +652,7 @@ class SettingsIn(BaseModel):
     match_window_days: Optional[int] = None
     fuel_correspondent_ids: Optional[list[int]] = None
     fuel_tag_ids: Optional[list[int]] = None
+    exclude_tag_ids: Optional[list[int]] = None
 
 
 @app.get("/api/settings")
@@ -512,9 +750,38 @@ def delete_income(income_id: int):
 
 # ---------------------------------------------------------------- API: Ausgaben & Auswertungen
 @app.get("/api/expenses")
-async def expenses(month: str):
+async def expenses(month: str, all: bool = False):
+    """Ausgaben-Belege des Monats mit Zweck. all=true: auch die nicht berücksichtigten (excluded=true)."""
     start, end = month_range(month)
-    return await fetch_expenses(start, end)
+    return await attach_purposes(await fetch_expenses(start, end, include_excluded=all, budget_view=True))
+
+
+@app.get("/api/month-items")
+async def month_items(month: str):
+    """Alle Ausgaben des Monats für die Übersicht: Belege (auch nicht berücksichtigte) + Bankbuchungen ohne Beleg."""
+    start, end = month_range(month)
+    st = get_settings()
+    docs = await attach_purposes(await fetch_expenses(start, end, include_excluded=True, budget_view=True))
+    items = [{**d, "kind": "doc"} for d in docs]
+    with db() as con:
+        rows = con.execute(
+            "SELECT * FROM transactions WHERE status IN ('open','ignored') AND amount < 0 AND date >= ? AND date < ?",
+            (start.isoformat(), end.isoformat())).fetchall()
+    bank_items = []
+    for r in rows:
+        bank_items.append({
+            "id": r["id"], "kind": "bank", "title": "Bankbuchung ohne Beleg", "date": r["date"],
+            "amount": -r["amount"], "correspondent": None,
+            "category": r["category_tag_id"] if r["category_tag_id"] in st["category_tag_ids"] else None,
+            "purpose": r["merchant"] or r["text"][:60], "purpose_source": "bank",
+            "excluded": r["status"] == "ignored", "exclude_reason": "ignoriert" if r["status"] == "ignored" else None,
+            "exclude_source": "bank", "url": None,
+        })
+    attach_allocations(bank_items, "tx")
+    apply_budget_reduction(bank_items)
+    items += bank_items
+    items.sort(key=lambda x: (x["date"], x["amount"]), reverse=True)
+    return items
 
 
 @app.get("/api/summary")
@@ -522,7 +789,9 @@ async def summary(month: str):
     start, end = month_range(month)
     meta = await get_meta()
     cats = get_settings()["category_tag_ids"]
-    paperless_docs = await fetch_expenses(start, end)
+    all_docs = await fetch_expenses(start, end, include_excluded=True, budget_view=True)
+    paperless_docs = [d for d in all_docs if not d["excluded"]]
+    excluded_docs = [d for d in all_docs if d["excluded"]]
     bank_items = bank_expenses(start, end, cats)
     docs = paperless_docs + bank_items
     budgets = get_budgets()
@@ -559,6 +828,7 @@ async def summary(month: str):
         "incomes": incomes,
         "document_count": len(paperless_docs),
         "bank_count": len(bank_items),
+        "excluded": {"count": len(excluded_docs), "amount": round(sum(d.get("amount_full", d["amount"]) for d in excluded_docs), 2)},
     }
 
 
@@ -569,7 +839,7 @@ async def trend(until: Optional[str] = None, months: int = 12):
     first = shift_month(last_start, -(months - 1))
     end = shift_month(last_start, 1)
     cats = get_settings()["category_tag_ids"]
-    docs = await fetch_expenses(first, end) + bank_expenses(first, end, cats)
+    docs = await fetch_expenses(first, end, budget_view=True) + bank_expenses(first, end, cats)
 
     series = []
     for i in range(months):
@@ -611,8 +881,51 @@ async def review(month: str):
         params["document_type__id__in"] = ",".join(map(str, st["review_document_type_ids"]))
     if st["review_tag_ids"]:
         params["tags__id__in"] = ",".join(map(str, st["review_tag_ids"]))
-    docs = [normalize(d, fid, st["category_tag_ids"]) for d in await pl_all("/api/documents/", params)]
-    return [d for d in docs if d["amount"] is None]
+    docs = normalize_all(await pl_all("/api/documents/", params), fid, st["category_tag_ids"], await _excl_ctx())
+    return await attach_purposes([d for d in docs if d["amount"] is None and not d["excluded"]])
+
+
+@app.get("/api/excluded")
+async def excluded_docs(month: str):
+    """Im Monat als 'nicht berücksichtigen' markierte Dokumente (mit und ohne Betrag)."""
+    start, end = month_range(month)
+    meta = await get_meta()
+    fid = require_amount_field(meta)
+    st = get_settings()
+    ctx = await _excl_ctx()
+    params = {"created__gte": start.isoformat(), "created__lt": end.isoformat(), "fields": DOC_FIELDS, "ordering": "-created"}
+    flagged = set(ctx[0])
+    out = []
+    for d in normalize_all(await pl_all("/api/documents/", params), fid, st["category_tag_ids"], ctx):
+        if d["excluded"] and (d["id"] in flagged or d["amount"] is not None):
+            out.append(d)
+    return await attach_purposes(out)
+
+
+class FlagIn(BaseModel):
+    excluded: bool
+    reason: Optional[str] = None
+
+
+@app.put("/api/documents/{doc_id}/flag")
+def flag_document(doc_id: int, body: FlagIn):
+    with db() as con:
+        if body.excluded:
+            con.execute(
+                "INSERT OR REPLACE INTO doc_flags(doc_id, excluded, reason, updated_at) VALUES (?, 1, ?, ?)",
+                (doc_id, (body.reason or "").strip() or None, datetime.now().isoformat(timespec="seconds")),
+            )
+        else:
+            con.execute("DELETE FROM doc_flags WHERE doc_id = ?", (doc_id,))
+    return {"doc_id": doc_id, "excluded": body.excluded, "reason": body.reason}
+
+
+@app.get("/api/exclude-reasons")
+def exclude_reasons():
+    with db() as con:
+        used = [r[0] for r in con.execute(
+            "SELECT reason FROM doc_flags WHERE reason IS NOT NULL GROUP BY reason ORDER BY COUNT(*) DESC LIMIT 20")]
+    return list(dict.fromkeys(used + EXCLUDE_REASONS))
 
 
 class DocUpdate(BaseModel):
@@ -771,6 +1084,8 @@ async def parse_one(doc_id: int) -> dict:
                 added += 1
                 new_ids.append(cur.lastrowid)
         apply_rules(con, new_ids)
+        from .re_api import auto_assign_rent
+        auto_assign_rent(con)
         con.execute(
             "INSERT OR REPLACE INTO statements(doc_id, title, parsed_at, tx_count) VALUES (?, ?, ?, ?)",
             (doc_id, doc.get("title"), datetime.now().isoformat(timespec="seconds"), len(bookings)),
@@ -802,16 +1117,25 @@ async def _transactions(month: str) -> list[dict]:
             "SELECT * FROM transactions WHERE date >= ? AND date < ? ORDER BY date, id", (start.isoformat(), end.isoformat()))]
         taken = {r[0] for r in con.execute("SELECT matched_doc_id FROM transactions WHERE matched_doc_id IS NOT NULL")}
     need = any(r["status"] == "open" and r["amount"] < 0 for r in rows)
-    invoices = await fetch_expenses(start - timedelta(days=window), end + timedelta(days=MATCH_BEFORE_DAYS + 1)) if need else []
+    invoices = await fetch_expenses(start - timedelta(days=window), end + timedelta(days=MATCH_BEFORE_DAYS + 1),
+                                    include_excluded=True) if need else []
     paid_tag = meta["paid_tag"]["id"] if meta["paid_tag"] else None
     free = [d for d in invoices if d["id"] not in taken and (paid_tag is None or paid_tag not in d["tags"])]
     corr = {c["id"]: c["name"] for c in meta["correspondents"]}
+    with db() as con:
+        rent = {r["tx_id"]: dict(r) for r in con.execute(
+            "SELECT rp.tx_id, rp.month, t.tenant_name FROM rent_payments rp JOIN tenancies t ON t.id = rp.tenancy_id")}
     for t in rows:
+        t["abs_amount"] = -t["amount"] if t["amount"] < 0 else t["amount"]
+    attach_allocations(rows, "tx", amount_key="abs_amount")
+    for t in rows:
+        t["rent"] = rent.get(t["id"])
         t["candidates"], t["unique"] = [], False
         if t["status"] == "open" and t["amount"] < 0:
             c = bank.candidates(t, free, corr, window, MATCH_BEFORE_DAYS)[:5]
             t["candidates"] = [
-                {k: x[k] for k in ("id", "title", "date", "amount", "correspondent", "score", "days", "name_hit", "url")} for x in c
+                {k: x[k] for k in ("id", "title", "date", "amount", "correspondent", "score", "days", "name_hit", "url", "excluded")}
+                for x in c
             ]
             t["unique"] = bool(c) and bank.is_unique(c)
         t["matched_url"] = f"{PAPERLESS_PUBLIC_URL}/documents/{t['matched_doc_id']}/details" if t["matched_doc_id"] else None
@@ -1285,6 +1609,11 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
         })
     return {"months": keys, "vehicles": out, "traccar_configured": bool(TRACCAR_URL), "traccar_error": traccar_error}
 
+
+# ---------------------------------------------------------------- Liegenschaften & Projekte
+from .re_api import router as re_router  # noqa: E402
+
+app.include_router(re_router)
 
 # ---------------------------------------------------------------- Frontend
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

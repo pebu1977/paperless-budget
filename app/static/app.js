@@ -54,6 +54,65 @@ function categoryOptions(selected) {
   return `<option value="">– keine –</option>` + cats.map((id) => `<option value="${id}" ${id === selected ? "selected" : ""}>${esc(tagName(id))}</option>`).join("");
 }
 
+// ------------------------------------------------------------ Dialog (Grund / Zweck)
+let reasonCache = null;
+function openDialog({ title, sub = "", label, value = "", suggestions = [], ok = "OK", extra = null }) {
+  const d = $("#dlg");
+  $("#dlgTitle").textContent = title; $("#dlgSub").textContent = sub; $("#dlgLabel").textContent = label;
+  const inp = $("#dlgInput"); inp.value = value;
+  $("#dlgList").innerHTML = suggestions.map((x) => `<option value="${esc(x)}">`).join("");
+  $("#dlgChips").innerHTML = suggestions.slice(0, 6).map((x) => `<span class="chip" data-v="${esc(x)}">${esc(x)}</span>`).join("");
+  $("#dlgOk").textContent = ok;
+  const ex = $("#dlgExtra"); ex.hidden = !extra; if (extra) ex.textContent = extra.label;
+  return new Promise((resolve) => {
+    const chipClick = (e) => { const v = e.target.dataset.v; if (v) { inp.value = v; inp.focus(); } };
+    const extraClick = () => { d.close("extra"); };
+    $("#dlgChips").addEventListener("click", chipClick);
+    ex.addEventListener("click", extraClick);
+    d.addEventListener("close", () => {
+      $("#dlgChips").removeEventListener("click", chipClick); ex.removeEventListener("click", extraClick);
+      resolve(d.returnValue === "ok" ? { value: inp.value.trim() } : d.returnValue === "extra" ? { extra: true } : null);
+    }, { once: true });
+    d.returnValue = ""; d.showModal(); inp.focus(); inp.select();
+  });
+}
+
+async function setBudgetFlag(item, include) {
+  if (item.kind === "bank") {
+    await api(`/api/transactions/${item.id}`, { method: "PATCH", body: JSON.stringify({ status: include ? "open" : "ignored" }) });
+    return true;
+  }
+  if (include && item.exclude_source === "tag") {
+    toast(`Wird über den Tag „${item.exclude_reason}“ ausgeschlossen – unter Einstellungen ändern`, true); return false;
+  }
+  let reason = null;
+  if (!include) {
+    reasonCache = reasonCache || await api("/api/exclude-reasons").catch(() => []);
+    const r = await openDialog({ title: "Nicht im Budget berücksichtigen", sub: `${item.purpose || item.title} · ${fmt(item.amount || 0)}`,
+      label: "Grund (optional)", suggestions: reasonCache, ok: "Ausschliessen" });
+    if (!r) return false;
+    reason = r.value || null;
+    if (reason && !reasonCache.includes(reason)) reasonCache.unshift(reason);
+  }
+  await api(`/api/documents/${item.id}/flag`, { method: "PUT", body: JSON.stringify({ excluded: !include, reason }) });
+  toast(include ? "Wieder im Budget" : "Nicht mehr im Budget" + (reason ? ` (${reason})` : ""));
+  return true;
+}
+
+async function editPurpose(item) {
+  const r = await openDialog({ title: "Wofür ist dieser Beleg?", sub: `${item.title} · ${fmtDate(item.date)}`, label: "Zweck",
+    value: item.purpose || "", ok: "Speichern", extra: item.purpose_source === "manuell" ? { label: "neu aus Rechnung lesen" } : null });
+  if (!r) return false;
+  const res = r.extra ? await api(`/api/documents/${item.id}/purpose`, { method: "DELETE" })
+    : await api(`/api/documents/${item.id}/purpose`, { method: "PUT", body: JSON.stringify({ purpose: r.value }) });
+  item.purpose = res.purpose; item.purpose_source = res.purpose_source;
+  return true;
+}
+const purposeHtml = (d) => d.purpose
+  ? `<span class="it-purpose" title="${esc(d.purpose)}">${esc(d.purpose)}</span>`
+  : `<span class="it-purpose none">Zweck nicht erkannt</span>`;
+const whyHtml = (d) => d.excluded ? `<span class="why">${esc(d.exclude_reason || "nicht berücksichtigt")}</span>` : "";
+
 // ------------------------------------------------------------ Navigation
 function setView(view) {
   S.view = view;
@@ -76,6 +135,8 @@ async function render() {
     if (S.view === "income") await renderIncome();
     if (S.view === "bank") await renderBank();
     if (S.view === "vehicles") await renderVehicles();
+    if (S.view === "realestate") await renderRE();
+    if (S.view === "projects") await renderProjects();
     if (S.view === "settings") renderSettings();
   } catch (e) { showAlert(e.message); }
   updateReviewBadge();
@@ -101,7 +162,10 @@ async function renderOverview() {
 
   $("#kpiIncome").textContent = fmt(sum.total_income);
   $("#kpiSpent").textContent = fmt(sum.total_spent);
-  $("#kpiDocs").textContent = `${sum.document_count} Beleg${sum.document_count === 1 ? "" : "e"}` + (sum.bank_count ? ` · ${sum.bank_count} Bankbuchung${sum.bank_count === 1 ? "" : "en"} ohne Beleg` : "");
+  $("#kpiDocs").innerHTML = esc(`${sum.document_count} Beleg${sum.document_count === 1 ? "" : "e"}` + (sum.bank_count ? ` · ${sum.bank_count} Bankbuchung${sum.bank_count === 1 ? "" : "en"} ohne Beleg` : ""))
+    + (sum.excluded && sum.excluded.count ? ` · <a href="#" id="kpiExcl">${sum.excluded.count} nicht berücksichtigt (${esc(fmt(sum.excluded.amount))})</a>` : "");
+  const ke = $("#kpiExcl"); if (ke) ke.onclick = (e) => { e.preventDefault(); $("#ovFilter").value = "out"; drawOvItems(); $("#ovItems").scrollIntoView({ behavior: "smooth", block: "center" }); };
+  ovItems = await api(`/api/month-items?month=${S.month}`).catch(() => []); ovShowAll = false; drawOvItems();
   const bal = $("#kpiBalance"); bal.textContent = fmt(sum.balance); bal.className = "kpi-value " + (sum.balance >= 0 ? "pos" : "neg");
   const budgetedSpent = sum.categories.filter((c) => c.budget != null).reduce((a, c) => a + c.spent, 0);
   if (sum.total_budget > 0) {
@@ -153,6 +217,43 @@ async function renderOverview() {
   });
 }
 
+let ovItems = [], ovShowAll = false;
+function drawOvItems() {
+  const f = $("#ovFilter").value, q = $("#ovSearch").value.trim().toLowerCase();
+  let list = ovItems.filter((d) => (f === "all" || (f === "in" ? !d.excluded : d.excluded)));
+  if (q) list = list.filter((d) => `${d.purpose || ""} ${d.title} ${corrName(d.correspondent)} ${d.exclude_reason || ""}`.toLowerCase().includes(q));
+  list = [...list].sort((a, b) => b.amount - a.amount);
+  const shown = ovShowAll || q ? list : list.slice(0, 12);
+  $("#ovItems").innerHTML = shown.length ? shown.map((d) => `<div class="it ${d.excluded ? "out" : ""}" data-kind="${d.kind}" data-id="${d.id}">
+      <input type="checkbox" class="budget" ${d.excluded ? "" : "checked"} ${d.exclude_source === "tag" ? "disabled" : ""} title="Im Budget berücksichtigen">
+      <span class="it-date muted">${fmtDate(d.date)}</span>
+      <div class="it-main">
+        <div>${purposeHtml(d)}${d.kind === "doc" ? ` <button class="edit" data-edit title="Zweck bearbeiten">✎</button>` : ""}<button class="edit" data-alloc title="Haus / Projekt zuordnen">↗</button>${whyHtml(d)}${allocBadges(d)}</div>
+        <div class="it-sub">${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a>` : esc(d.title)}${d.correspondent ? " · " + esc(corrName(d.correspondent)) : ""}</div>
+      </div>
+      <span class="it-cat">${d.category ? `<span class="dot" style="background:${esc(tagColor(d.category))}"></span>${esc(tagName(d.category))}` : "–"}</span>
+      <span class="it-amt">${fmt(d.amount)}</span>
+    </div>`).join("") : `<div class="empty">Keine Einträge.</div>`;
+  const more = $("#ovMore"); more.hidden = ovShowAll || !!q || list.length <= 12; more.textContent = `alle ${list.length} anzeigen`;
+}
+$("#ovFilter").onchange = drawOvItems;
+$("#ovSearch").oninput = drawOvItems;
+$("#ovMore").onclick = () => { ovShowAll = true; drawOvItems(); };
+$("#ovItems").addEventListener("click", async (e) => {
+  const row = e.target.closest(".it"); if (!row) return;
+  const item = ovItems.find((x) => x.kind === row.dataset.kind && x.id === Number(row.dataset.id));
+  try {
+    if (e.target.classList.contains("budget")) {
+      e.preventDefault();
+      if (await setBudgetFlag(item, !!e.target.checked === false ? false : true)) render();
+    } else if (e.target.hasAttribute("data-edit")) {
+      if (await editPurpose(item)) drawOvItems();
+    } else if (e.target.hasAttribute("data-alloc")) {
+      openAlloc({ ...item, amount: item.amount_full ?? item.amount });
+    }
+  } catch (err) { toast(err.message, true); }
+});
+
 function drawChart(id, cfg) {
   if (!window.Chart) return;
   S.charts[id]?.destroy();
@@ -168,27 +269,52 @@ $("#createField").onclick = async () => {
 let expDocs = [];
 async function renderExpenses() {
   if (!S.meta.amount_field) { $("#expBody").innerHTML = `<tr><td colspan="5" class="empty">Zuerst das Betrags-Feld anlegen (Übersicht).</td></tr>`; return; }
-  expDocs = await api(`/api/expenses?month=${S.month}`);
+  const [inc, excl] = await Promise.all([api(`/api/expenses?month=${S.month}&all=true`), api(`/api/excluded?month=${S.month}`)]);
+  const seen = new Set(inc.map((d) => d.id));
+  expDocs = [...inc, ...excl.filter((d) => !seen.has(d.id))].map((d) => ({ ...d, kind: "doc" }));
   const f = $("#expFilter"), prev = f.value;
   f.innerHTML = `<option value="all">Alle Kategorien</option><option value="none">Unkategorisiert</option>` +
-    S.settings.category_tag_ids.map((id) => `<option value="${id}">${esc(tagName(id))}</option>`).join("");
+    S.settings.category_tag_ids.map((id) => `<option value="${id}">${esc(tagName(id))}</option>`).join("") +
+    `<option value="out">Nicht berücksichtigt</option>`;
   f.value = [...f.options].some((o) => o.value === prev) ? prev : "all";
   drawExpenses();
 }
 $("#expFilter").onchange = drawExpenses;
 
+$("#expSearch").oninput = () => drawExpenses();
 function drawExpenses() {
-  const f = $("#expFilter").value;
-  const list = expDocs.filter((d) => f === "all" || (f === "none" ? d.category == null : d.category === Number(f)));
-  $("#expBody").innerHTML = list.length ? list.map((d) => `<tr data-id="${d.id}">
+  const f = $("#expFilter").value, q = $("#expSearch").value.trim().toLowerCase();
+  let list = expDocs.filter((d) => f === "out" ? d.excluded
+    : (f === "all" || (f === "none" ? d.category == null : d.category === Number(f))) && (f === "all" || !d.excluded));
+  if (q) list = list.filter((d) => `${d.purpose || ""} ${d.title} ${corrName(d.correspondent)} ${d.exclude_reason || ""}`.toLowerCase().includes(q));
+  $("#expBody").innerHTML = list.length ? list.map((d) => `<tr data-id="${d.id}" class="${d.excluded ? "out" : ""}">
+      <td><input type="checkbox" class="budget" ${d.excluded ? "" : "checked"} ${d.exclude_source === "tag" ? "disabled" : ""} title="Im Budget berücksichtigen"></td>
       <td>${fmtDate(d.date)}</td>
-      <td><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a></td>
+      <td style="max-width:380px"><div class="it-main"><div>${purposeHtml(d)} <button class="edit" data-edit title="Zweck bearbeiten">✎</button><button class="edit" data-alloc title="Haus / Projekt zuordnen">↗</button>${whyHtml(d)}${allocBadges(d)}</div>
+        <div class="it-sub"><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a></div></div></td>
       <td>${esc(corrName(d.correspondent))}</td>
       <td><select class="cat">${categoryOptions(d.category)}</select></td>
-      <td class="num"><input class="amount" type="number" step="0.05" value="${d.amount}"></td>
-    </tr>`).join("") : `<tr><td colspan="5" class="empty">Keine Ausgaben.</td></tr>`;
-  $("#expTotal").textContent = fmt(list.reduce((a, d) => a + d.amount, 0));
+      <td class="num">${d.amount == null ? `<span class="muted small">ohne Betrag</span>` : `<input class="amount" type="number" step="0.05" value="${(d.amount_full ?? d.amount).toFixed(2)}">${d.alloc_note ? `<div class="muted small">${esc(d.alloc_note)}</div>` : ""}`}</td>
+    </tr>`).join("") : `<tr><td colspan="6" class="empty">Keine Ausgaben.</td></tr>`;
+  const counted = list.filter((d) => !d.excluded && d.amount != null);
+  $("#expTotal").textContent = fmt(counted.reduce((a, d) => a + d.amount, 0));
+  const nOut = list.filter((d) => d.excluded).length;
+  $("#expTotalNote").textContent = nOut && f !== "out" ? `(ohne ${nOut} nicht berücksichtigte)` : f === "out" ? "(zählt nicht zum Budget)" : "";
 }
+$("#expBody").addEventListener("click", async (e) => {
+  const tr = e.target.closest("tr[data-id]"); if (!tr) return;
+  const doc = expDocs.find((d) => d.id === Number(tr.dataset.id));
+  try {
+    if (e.target.classList.contains("budget")) {
+      e.preventDefault();
+      if (await setBudgetFlag(doc, !doc.excluded ? false : true)) await renderExpenses();
+    } else if (e.target.hasAttribute("data-edit")) {
+      if (await editPurpose(doc)) drawExpenses();
+    } else if (e.target.hasAttribute("data-alloc")) {
+      openAlloc({ ...doc, amount: doc.amount_full ?? doc.amount });
+    }
+  } catch (err) { toast(err.message, true); }
+});
 
 $("#expBody").addEventListener("change", async (e) => {
   const tr = e.target.closest("tr[data-id]"); if (!tr) return;
@@ -214,21 +340,38 @@ async function renderReview() {
   if (st.review_tag_ids.length) parts.push("Tag: " + st.review_tag_ids.map(tagName).join(", "));
   $("#reviewInfo").innerHTML = `Dokumente aus ${esc(monthLabel(S.month))} ohne „${esc(S.meta.amount_field.name)}“` + (parts.length ? ` · ${esc(parts.join(" · "))}` : ` · alle Dokumenttypen (eingrenzen unter <a href="#" data-goto="settings">Einstellungen</a>)`);
   const docs = await api(`/api/review?month=${S.month}`);
+  reviewDocs = docs;
   list.innerHTML = docs.length ? docs.map((d) => `<div class="rv" data-id="${d.id}">
       <div>
         <div class="rv-title"><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a></div>
         <div class="rv-meta">${fmtDate(d.date)}${d.correspondent ? " · " + esc(corrName(d.correspondent)) : ""}${d.document_type ? " · " + esc(typeName(d.document_type)) : ""}</div>
+        <div class="rv-purpose">${purposeHtml(d)} <button class="edit" data-edit title="Zweck bearbeiten">✎</button></div>
       </div>
       <div class="rv-actions">
         <select class="cat">${categoryOptions(d.category)}</select>
         <input class="amount" type="number" step="0.05" placeholder="Betrag">
         <button class="primary save">Speichern</button>
+        <button class="linkbtn" data-skip title="Zählt nicht zum Budget und verschwindet aus dieser Liste">nicht berücksichtigen</button>
       </div>
       ${d.content ? `<div class="rv-content">${esc(d.content)}</div>` : ""}
     </div>`).join("") : `<div class="empty">Alles erfasst – keine Dokumente ohne Betrag. 🎉</div>`;
 }
 
+let reviewDocs = [];
 $("#reviewList").addEventListener("click", async (e) => {
+  const card0 = e.target.closest(".rv"); if (!card0) return;
+  const item = reviewDocs.find((d) => d.id === Number(card0.dataset.id));
+  if (e.target.hasAttribute("data-edit")) {
+    try { if (await editPurpose(item)) card0.querySelector(".rv-purpose").innerHTML = `${purposeHtml(item)} <button class="edit" data-edit title="Zweck bearbeiten">✎</button>`; }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (e.target.hasAttribute("data-skip")) {
+    try {
+      if (await setBudgetFlag({ ...item, kind: "doc" }, false)) { card0.remove(); updateReviewBadge(); if (!$("#reviewList").children.length) renderReview(); }
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
   if (!e.target.classList.contains("save")) return;
   const card = e.target.closest(".rv"), id = Number(card.dataset.id);
   const amount = card.querySelector(".amount").value, cat = card.querySelector(".cat").value;
@@ -348,22 +491,23 @@ function txRow(t) {
   } else if (k === "ignored") {
     act = `<span class="pill grey">ignoriert</span><button class="linkbtn" data-act="unignore">zurückholen</button>`;
   } else if (k === "credit") {
-    act = `<span class="pill grey">Gutschrift</span><button class="linkbtn" data-act="ignore">ignorieren</button><button class="linkbtn" data-act="flip">± Vorzeichen</button>`;
+    act = `<span class="pill grey">${t.rent ? "Mietzahlung" : "Gutschrift"}</span><button class="linkbtn" data-act="ignore">ignorieren</button><button class="linkbtn" data-act="flip">± Vorzeichen</button>`;
   } else {
     if (t.candidates.length) {
-      const opts = t.candidates.map((c) => `<option value="${c.id}">${esc(c.title)} · ${fmtDate(c.date)}${c.correspondent ? " · " + esc(corrName(c.correspondent)) : ""}</option>`).join("");
+      const opts = t.candidates.map((c) => `<option value="${c.id}">${esc(c.title)} · ${fmtDate(c.date)}${c.correspondent ? " · " + esc(corrName(c.correspondent)) : ""}${c.excluded ? " (nicht im Budget)" : ""}</option>`).join("");
       act = `<select class="cand">${opts}</select><button class="primary" data-act="match">Zuordnen</button>`;
       if (t.unique) act = `<span class="pill warn" title="eindeutiger Treffer">Vorschlag</span>` + act;
     }
     act += `<select class="txcat" title="Kategorie (zählt als Ausgabe ohne Beleg)">${categoryOptions(t.category_tag_id).replace("– keine –", "Kategorie …")}</select>
       ${S.vehicles.length ? `<select class="txveh" title="Fahrzeug (zählt zu dessen Kosten)">${vehicleOptions(t.vehicle_id)}</select>` : ""}
+      <button class="linkbtn" data-act="alloc" title="Haus / Projekt zuordnen">↗ zuordnen</button>
       <button class="linkbtn" data-act="rule" title="Regel für diesen Händler anlegen">Regel</button>
       <button class="linkbtn" data-act="ignore" title="z.B. Übertrag aufs Sparkonto">ignorieren</button>
       <button class="linkbtn" data-act="flip">±</button>`;
   }
   return `<div class="tx ${k}" data-id="${t.id}">
     <div class="tx-date">${fmtDate(t.date)}</div>
-    <div style="min-width:0"><div class="tx-merchant">${esc(t.merchant || t.text.split(" · ")[0])}</div><div class="tx-text" title="${esc(t.text)}">${esc(t.text)}</div></div>
+    <div style="min-width:0"><div class="tx-merchant">${esc(t.merchant || t.text.split(" · ")[0])}${t.rent ? ` <span class="allocb">🏠 Miete ${esc(t.rent.tenant_name)} ${esc(t.rent.month)}</span>` : ""}${allocBadges({ ...t, amount: t.abs_amount })}</div><div class="tx-text" title="${esc(t.text)}">${esc(t.text)}</div></div>
     <div class="tx-amt ${t.amount > 0 ? "credit" : ""}">${fmt(t.amount)}${unchecked}</div>
     <div class="tx-act">${act}</div>
   </div>`;
@@ -384,6 +528,8 @@ $("#bkList").addEventListener("click", async (e) => {
       await api(`/api/transactions/${id}`, { method: "PATCH", body: JSON.stringify({ status: act === "ignore" ? "ignored" : "open" }) });
     } else if (act === "flip") {
       await api(`/api/transactions/${id}`, { method: "PATCH", body: JSON.stringify({ flip_sign: true }) });
+    } else if (act === "alloc") {
+      openAlloc({ kind: "tx", id: t.id, title: t.merchant || t.text, amount: t.abs_amount, allocations: t.allocations || [] }); return;
     } else if (act === "rule") {
       const cat = row.querySelector(".txcat").value, vsel = row.querySelector(".txveh"), vid = vsel ? vsel.value : "";
       if (!cat && !vid) { toast("Erst Kategorie und/oder Fahrzeug wählen, dann „Regel“", true); return; }
@@ -464,11 +610,19 @@ $("#ruleList").addEventListener("click", async (e) => {
   await api(`/api/rules/${id}`, { method: "DELETE" }); renderBank();
 });
 
+let openInvList = [];
 function drawOpenInvoices(list) {
-  $("#openInv").innerHTML = list.length ? list.map((d) => `<div class="invitem">
-      <span><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a> <span class="muted small">· ${fmtDate(d.date)}${d.correspondent ? " · " + esc(corrName(d.correspondent)) : ""}</span></span>
+  openInvList = list;
+  $("#openInv").innerHTML = list.length ? list.map((d) => `<div class="invitem" data-id="${d.id}">
+      <span><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a> <span class="muted small">· ${fmtDate(d.date)}${d.correspondent ? " · " + esc(corrName(d.correspondent)) : ""}</span>
+        <button class="linkbtn" data-skip title="Zählt nicht zum Budget und erscheint nicht mehr als offen">nicht berücksichtigen</button></span>
       <b class="num">${fmt(d.amount)}</b></div>`).join("") : `<div class="empty">Keine offenen Rechnungen.</div>`;
 }
+$("#openInv").addEventListener("click", async (e) => {
+  if (!e.target.hasAttribute("data-skip")) return;
+  const d = openInvList.find((x) => x.id === Number(e.target.closest(".invitem").dataset.id));
+  try { if (await setBudgetFlag({ ...d, kind: "doc" }, false)) renderBank(); } catch (err) { toast(err.message, true); }
+});
 
 // ------------------------------------------------------------ Fahrzeuge
 const ENERGIES = ["Benzin", "Diesel", "Elektro", "Hybrid"];
@@ -661,6 +815,7 @@ function renderSettings() {
     stTags: new Set(S.settings.statement_tag_ids || []),
     window: S.settings.match_window_days || 60,
     fuelCorr: new Set(S.settings.fuel_correspondent_ids || []),
+    exclTags: new Set(S.settings.exclude_tag_ids || []),
     fuelTags: new Set(S.settings.fuel_tag_ids || []),
   };
   const q = $("#tagSearch").value.trim().toLowerCase();
@@ -680,6 +835,7 @@ function renderSettings() {
   const chips = (items, set, attr) => items.map((x) => `<label class="chip ${set.has(x.id) ? "on" : ""}"><input type="checkbox" data-${attr}="${x.id}" ${set.has(x.id) ? "checked" : ""}>${esc(x.name)}</label>`).join("") || `<span class="muted small">keine vorhanden</span>`;
   $("#reviewTypes").innerHTML = chips(S.meta.document_types, draft.types, "type");
   $("#reviewTags").innerHTML = chips(S.meta.tags, draft.tags, "tag");
+  $("#exclTags").innerHTML = chips(S.meta.tags, draft.exclTags, "xtag");
   $("#stTypes").innerHTML = chips(S.meta.document_types, draft.stTypes, "sttype");
   $("#stTags").innerHTML = chips(S.meta.tags, draft.stTags, "sttag");
   $("#matchWindow").value = draft.window;
@@ -709,8 +865,8 @@ $("#catSettings").addEventListener("click", (e) => {
 });
 document.querySelector("#view-settings").addEventListener("change", (e) => {
   const d = e.target.dataset;
-  const key = d.type ? "types" : d.tag ? "tags" : d.sttype ? "stTypes" : d.sttag ? "stTags" : d.fcorr ? "fuelCorr" : d.ftag ? "fuelTags" : null; if (!key) return;
-  const set = draft[key], id = Number(d.type || d.tag || d.sttype || d.sttag || d.fcorr || d.ftag);
+  const key = d.type ? "types" : d.tag ? "tags" : d.sttype ? "stTypes" : d.sttag ? "stTags" : d.fcorr ? "fuelCorr" : d.ftag ? "fuelTags" : d.xtag ? "exclTags" : null; if (!key) return;
+  const set = draft[key], id = Number(d.type || d.tag || d.sttype || d.sttag || d.fcorr || d.ftag || d.xtag);
   e.target.checked ? set.add(id) : set.delete(id);
   e.target.closest(".chip").classList.toggle("on", e.target.checked);
 });
@@ -719,7 +875,7 @@ $("#saveSettings").onclick = async () => {
     S.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify({
       category_tag_ids: draft.cats, review_document_type_ids: [...draft.types], review_tag_ids: [...draft.tags],
       statement_document_type_ids: [...draft.stTypes], statement_tag_ids: [...draft.stTags], match_window_days: draft.window,
-      fuel_correspondent_ids: [...draft.fuelCorr], fuel_tag_ids: [...draft.fuelTags],
+      fuel_correspondent_ids: [...draft.fuelCorr], fuel_tag_ids: [...draft.fuelTags], exclude_tag_ids: [...draft.exclTags],
     }) });
     const budgets = {};
     for (const [id, v] of Object.entries(draft.budgets)) budgets[id] = v;
