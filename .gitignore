@@ -1,0 +1,12 @@
+# Zugangsdaten und persönliche Daten – nie committen
+.env
+data/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Lokale Anpassungen (z.B. Docker-Netzwerk) – werden von Updates nicht überschrieben
+docker-compose.override.yml
