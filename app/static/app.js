@@ -657,6 +657,14 @@ async function renderVehicles() {
   if (!ff.date.value) ff.date.value = new Date().toISOString().slice(0, 10);
 }
 
+function tcInfo(v) {
+  if (!v.traccar_device_id) return " · kein Traccar-Gerät zugewiesen";
+  if (v.traccar_device_missing) return ` · <span class="neg">Traccar-Gerät ${v.traccar_device_id} existiert nicht (mehr) – unter Einstellungen neu wählen</span>`;
+  if (!v.traccar_last_update) return v.traccar_device_name ? ` · Traccar: ${esc(v.traccar_device_name)} · noch nie gemeldet` : "";
+  const last = new Date(v.traccar_last_update + "Z"), days = Math.floor((Date.now() - last) / 86400000);
+  const txt = ` · Traccar: ${esc(v.traccar_device_name || "")} · letzte Meldung ${last.toLocaleDateString("de-CH")}`;
+  return days > 7 ? ` · <span class="neg">${txt.slice(3)} (vor ${days} Tagen)</span>` : txt;
+}
 function vehCard(v, entries) {
   const unit = v.unit;
   const kpi = (label, value, sub = "") => `<div class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${sub ? `<div class="kpi-sub">${sub}</div>` : ""}</div>`;
@@ -665,7 +673,7 @@ function vehCard(v, entries) {
     ...v.items,
   ].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 40);
   return `<div class="card veh">
-    <div class="veh-head"><h3>${esc(v.name)}</h3><span class="muted small">${esc(v.energy)}${v.traccar_device_id ? "" : " · kein Traccar-Gerät"}</span></div>
+    <div class="veh-head"><h3>${esc(v.name)}</h3><span class="muted small">${esc(v.energy)}${tcInfo(v)}</span></div>
     <div class="veh-kpis">
       ${kpi("Kosten", fmt(v.cost), `davon Treibstoff ${fmt(v.fuel_total)}`)}
       ${kpi("Gefahren", fmtKm(v.km))}
@@ -714,6 +722,10 @@ function drawVehChart(v) {
 }
 
 $("#vehMonths").onchange = () => renderVehicles().catch((e) => showAlert(e.message));
+$("#vehRefresh").onclick = async () => {
+  await api("/api/traccar/refresh", { method: "POST" }); toast("Kilometer werden neu geladen …");
+  renderVehicles().catch((e) => showAlert(e.message));
+};
 $("#vehList").addEventListener("click", async (e) => {
   const id = e.target.dataset.delfuel; if (!id || !confirm("Tankvorgang löschen?")) return;
   await api(`/api/fuel-entries/${id}`, { method: "DELETE" }); renderVehicles();
@@ -760,7 +772,8 @@ $("#fuelForm").onsubmit = async (e) => {
 // --- Verwaltung (Einstellungen)
 async function loadTraccarDevices() {
   if (S.traccarDevices !== null) return;
-  try { S.traccarDevices = await api("/api/traccar/devices"); } catch { S.traccarDevices = []; }
+  try { S.traccarDevices = await api("/api/traccar/devices"); S.traccarError = S.traccarDevices.length ? null : "Traccar meldet keine Geräte für diesen Benutzer."; }
+  catch (e) { S.traccarDevices = []; S.traccarError = e.message; }
   renderVehicleSettings();
 }
 function renderVehicleSettings() {
@@ -778,11 +791,14 @@ function renderVehicleSettings() {
       <button class="primary" data-vsave>Speichern</button>
       ${v.id ? `<button class="linkbtn danger" data-vdel>löschen</button>` : `<button class="linkbtn" data-vcancel>abbrechen</button>`}
     </div>`;
-  const head = `<div class="vs-row vs-head"><span>Name</span><span>Antrieb</span><span>Traccar-Gerät${devs.length ? "" : " (nicht erreichbar)"}</span><span>Paperless-Tag</span><span>Tankkarte(n)</span><span></span><span></span></div>`;
+  const tcHint = S.traccarError ? `<div class="alert" style="margin:8px 0">Traccar: ${esc(S.traccarError)}
+      <button class="linkbtn" id="tcRetry">erneut versuchen</button></div>` : "";
+  const head = tcHint + `<div class="vs-row vs-head"><span>Name</span><span>Antrieb</span><span>Traccar-Gerät${devs.length ? "" : " (nicht erreichbar)"}</span><span>Paperless-Tag</span><span>Tankkarte(n)</span><span></span><span></span></div>`;
   $("#vehSettings").innerHTML = head + (S.vehicles.map(row).join("") || "") + (S.newVehicle ? row({}) : "") +
     (!S.vehicles.length && !S.newVehicle ? `<div class="empty">Noch kein Fahrzeug.</div>` : "");
 }
 $("#vehAdd").onclick = () => { S.newVehicle = true; renderVehicleSettings(); };
+document.addEventListener("click", (e) => { if (e.target.id === "tcRetry") { S.traccarDevices = null; loadTraccarDevices(); } });
 $("#vehSettings").addEventListener("click", async (e) => {
   const r = e.target.closest(".vs-row"); if (!r) return;
   const id = r.dataset.id;

@@ -1380,7 +1380,8 @@ async def traccar_devices():
 
 
 async def traccar_month_km(device_id: int, month: str) -> float:
-    """Gefahrene km eines Geräts in einem Monat (vergangene Monate werden dauerhaft zwischengespeichert)."""
+    """Gefahrene km eines Geräts in einem Monat.
+    Abgeschlossene Monate werden zwischengespeichert – 0 km aber nur 12 h (könnte ein Abruf ohne Daten gewesen sein)."""
     start, end = month_range(month)
     today = date.today()
     if start > today:
@@ -1388,8 +1389,12 @@ async def traccar_month_km(device_id: int, month: str) -> float:
     current = start <= today < end
     with db() as con:
         row = con.execute("SELECT km, fetched_at FROM traccar_km WHERE device_id = ? AND month = ?", (device_id, month)).fetchone()
-    if row and (not current or time.time() - row["fetched_at"] < 3600):
-        return row["km"]
+    if row:
+        age = time.time() - row["fetched_at"]
+        if current and age < 3600:
+            return row["km"]
+        if not current and (row["km"] > 0 or age < 12 * 3600):
+            return row["km"]
     to = min(end, today + timedelta(days=1))
     data = await tc_get("/api/reports/summary", {
         "deviceId": device_id, "from": f"{start.isoformat()}T00:00:00Z", "to": f"{to.isoformat()}T00:00:00Z",
@@ -1555,6 +1560,12 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
         e["vid"] = vehicle_for_entry(e, vehicles)
 
     traccar_error = None
+    tc_devices: dict = {}
+    if TRACCAR_URL and any(v["traccar_device_id"] for v in vehicles):
+        try:
+            tc_devices = {d["id"]: d for d in await tc_get("/api/devices")}
+        except HTTPException as e:
+            traccar_error = e.detail
     out = []
     for v in vehicles:
         series = {k: {"month": k, "fuel_cost": 0.0, "quantity": 0.0, "bank_fuel": 0.0, "doc_cost": 0.0, "bank_cost": 0.0, "km": None}
@@ -1575,6 +1586,11 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
                 series[t["date"][:7]]["bank_fuel" if is_fuel else "bank_cost"] += -t["amount"]
                 items.append({"date": t["date"], "title": t["merchant"] or t["text"][:60], "amount": -t["amount"],
                               "source": "Tanken (Bank)" if is_fuel else "Bank", "url": None})
+        dev = tc_devices.get(v["traccar_device_id"]) if v["traccar_device_id"] else None
+        tc_info = {"traccar_device_name": dev.get("name") if dev else None,
+                   "traccar_last_update": (dev.get("lastUpdate") or "")[:19] if dev else None,
+                   "traccar_status": dev.get("status") if dev else None,
+                   "traccar_device_missing": bool(v["traccar_device_id"] and tc_devices and not dev)}
         if v["traccar_device_id"] and TRACCAR_URL:
             try:
                 for k in keys:
@@ -1598,7 +1614,7 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
         cons = veh.consumption(sum(m["quantity"] for m in basis), sum(m["km"] for m in basis)) if basis else None
         unit = "kWh" if v["energy"] == "Elektro" else "L"
         out.append({
-            **v, "unit": unit, "months": rows, **tot, "km": km,
+            **v, **tc_info, "unit": unit, "months": rows, **tot, "km": km,
             "cost_per_km": veh.per_km(tot["cost"], km or 0),
             "fuel_per_km": veh.per_km(tot["fuel_total"], km or 0),
             "consumption": cons,
