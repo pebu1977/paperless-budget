@@ -1648,9 +1648,36 @@ def vehicle_for_entry(e: dict, vehicles: list[dict]) -> Optional[int]:
     return next((v["id"] for v in vehicles if veh.card_matches(e.get("card") or "", v.get("card_keys") or "")), None)
 
 
+async def pdf_layout_text(doc_id: int) -> str:
+    """Text des PDFs mit erhaltenem Zeilenlayout (pdftotext -layout). Paperless speichert OCR-Text von Tabellen
+    oft spaltenweise – für Rechnungen mit Tabellen ist das Layout zuverlässiger."""
+    import asyncio
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("pdftotext"):
+        return ""
+    try:
+        r = await client().get(f"/api/documents/{doc_id}/download/", timeout=120)
+    except httpx.HTTPError:
+        return ""
+    if r.status_code != 200 or not r.content.startswith(b"%PDF"):
+        return ""
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+        f.write(r.content)
+        f.flush()
+        try:
+            res = await asyncio.to_thread(subprocess.run, ["pdftotext", "-layout", f.name, "-"], capture_output=True, timeout=120)
+        except Exception:
+            return ""
+    return res.stdout.decode("utf-8", "replace")
+
+
 async def parse_fuel_one(doc_id: int) -> dict:
     doc = await pl_request("GET", f"/api/documents/{doc_id}/")
-    entries = veh.parse_fuel_invoice(doc.get("content") or "")
+    entries = veh.parse_any_fuel(doc.get("content") or "")
+    if not entries:
+        entries = veh.parse_any_fuel(await pdf_layout_text(doc_id))
     added = 0
     with db() as con:
         hashes = {e.hash for e in entries}
@@ -1724,6 +1751,8 @@ async def parking_docs():
 async def parse_parking_one(doc_id: int) -> dict:
     doc = await pl_request("GET", f"/api/documents/{doc_id}/")
     entries = pk.parse_parking_statement(doc.get("content") or "")
+    if not entries:
+        entries = pk.parse_parking_statement(await pdf_layout_text(doc_id))
     added = 0
     with db() as con:
         hashes = {e.hash for e in entries}

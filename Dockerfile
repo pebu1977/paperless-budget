@@ -3,8 +3,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DB_PATH=/data/budget.db HOME=/tmp
 WORKDIR /srv
 
-# LibreOffice (nur Writer) für die PDF-Erzeugung der Nebenkostenabrechnung
-RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer-nogui fonts-dejavu-core \
+# LibreOffice (nur Writer) für die PDF-Erzeugung der Nebenkostenabrechnung, poppler-utils (pdftotext) zum Lesen von Rechnungen
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer-nogui fonts-dejavu-core poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

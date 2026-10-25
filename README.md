@@ -242,7 +242,9 @@ Liegenschaftskosten zählen standardmässig nicht zum Haushaltsbudget (abschaltb
 3. **Einstellungen → Fahrzeuge**: Fahrzeug mit Antrieb, Traccar-Gerät, Paperless-Tag und Tankkarten-Nr.
    anlegen (Endziffern genügen, mehrere mit Komma). Darunter den Korrespondenten der Tankkarten-Rechnungen
    wählen.
-4. **Fahrzeuge → Neue einlesen** liest die Tankkarten-Rechnungen (getestet mit Vögtlin-Meyer).
+4. **Fahrzeuge → Neue einlesen** liest die Tankkarten-Rechnungen (Vögtlin-Meyer und AVIA / A.H. Meyer & Cie AG –
+   bei AVIA hat jedes Fahrzeug eine eigene Karten-Nr.; mehrere Nummern pro Fahrzeug mit Komma eintragen).
+   Ist der OCR-Text in Paperless spaltenweise durcheinander, liest die App den Text direkt aus dem PDF.
 5. Tankvorgänge mit Debitkarte im Abgleich oder per Regel dem Fahrzeug zuordnen. Für einen korrekten
    Verbrauch die Liter über „Tankvorgang manuell erfassen“ ergänzen – oder bei Elektroautos die geladenen kWh.
 
