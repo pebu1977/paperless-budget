@@ -281,7 +281,8 @@ init_db()
 def migrate_db():
     """Spalten nachrüsten, die in älteren Versionen fehlen."""
     wanted = {"transactions": {"card": "TEXT", "vehicle_id": "INTEGER", "merchant": "TEXT"}, "rules": {"vehicle_id": "INTEGER"},
-              "vehicles": {"km_source": "TEXT", "plates": "TEXT"}, "parking_entries": {"end_time": "TEXT", "driver": "TEXT"}}
+              "vehicles": {"km_source": "TEXT", "plates": "TEXT"}, "parking_entries": {"end_time": "TEXT", "driver": "TEXT"},
+              "traccar_day_km": {"failed": "INTEGER"}}
     with db() as con:
         for table, cols in wanted.items():
             have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -1538,47 +1539,66 @@ def km_from_positions(positions: list[dict]) -> float:
     return round(total, 2)
 
 
+GPS_DAY_FAILS: dict = {}   # (Gerät, Tag) -> Anzahl Läufe, in denen der ganze Tag nicht geladen werden konnte
+
+
+async def _tc_positions(device_id: int, t0: datetime, t1: datetime) -> Optional[list]:
+    """Positionen eines Zeitfensters; None, wenn Traccar das Fenster mit einem Fehler beantwortet."""
+    import asyncio
+    params = {"deviceId": device_id, "from": t0.strftime("%Y-%m-%dT%H:%M:%SZ"), "to": t1.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    # Routenbericht ist der offizielle Weg für historische Positionen; /api/positions mit Zeitraum als Ausweichweg
+    for path in ("/api/reports/route", "/api/positions"):
+        try:
+            r = await traccar_client().get(path, params=params, headers={"Accept": "application/json"}, timeout=180)
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"Traccar nicht erreichbar ({type(e).__name__})")
+        if r.status_code < 400:
+            return await asyncio.to_thread(json.loads, r.content)   # im Thread: App bleibt bedienbar
+        if r.status_code in (401, 403):
+            raise HTTPException(502, "Traccar lehnt die Anmeldung ab")
+    return None
+
+
 async def gps_day_km(device_id: int, day: date, force: bool = False) -> float:
+    import asyncio
     today = date.today()
     with db() as con:
         row = con.execute("SELECT km, fetched_at FROM traccar_day_km WHERE device_id = ? AND day = ?",
                           (device_id, day.isoformat())).fetchone()
     if row and not force and (day < today or time.time() - row["fetched_at"] < 3600):
         return row["km"]
-    import asyncio
-    # in 6-Stunden-Stücken laden: kleinere Antworten, weniger Zeitüberschreitungen bei vielen Positionen
-    km, points, last = 0.0, 0, None
-    for h in range(0, 24, 6):
-        t0 = datetime(day.year, day.month, day.day) + timedelta(hours=h)
-        t1 = t0 + timedelta(hours=6)
-        params = {"deviceId": device_id, "from": t0.strftime("%Y-%m-%dT%H:%M:%SZ"), "to": t1.strftime("%Y-%m-%dT%H:%M:%SZ")}
-        r = None
-        # Routenbericht ist der offizielle Weg für historische Positionen; /api/positions mit Zeitraum als Ausweichweg
-        for path in ("/api/reports/route", "/api/positions"):
-            try:
-                r = await traccar_client().get(path, params=params, headers={"Accept": "application/json"}, timeout=180)
-            except httpx.HTTPError as e:
-                raise HTTPException(502, f"Traccar nicht erreichbar ({type(e).__name__}) am {day:%d.%m.%Y}")
-            if r.status_code < 400:
-                break
-        if r.status_code >= 400:
-            raise HTTPException(502, f"Traccar-Fehler {r.status_code} beim Laden der Positionen vom {day:%d.%m.%Y}: {r.text[:200]}")
-        # JSON auswerten und rechnen im Thread, damit die App währenddessen bedienbar bleibt
-        positions = await asyncio.to_thread(json.loads, r.content)
+    # in 6-Stunden-Stücken laden; scheitert ein Stück, stundenweise – fehlerhafte Stunden werden als Lücke gezählt
+    km, points, last, failed_hours = 0.0, 0, None, 0
+    base = datetime(day.year, day.month, day.day)
+    windows = [(base + timedelta(hours=h), 6) for h in range(0, 24, 6)]
+    while windows:
+        t0, hours = windows.pop(0)
+        positions = await _tc_positions(device_id, t0, t0 + timedelta(hours=hours))
+        if positions is None:
+            if hours > 1:
+                windows = [(t0 + timedelta(hours=k), 1) for k in range(hours)] + windows
+            else:
+                failed_hours += 1
+            continue
         if last is not None:
             positions = [last] + positions          # Strecke über die Stückgrenze hinweg mitzählen
         km += await asyncio.to_thread(km_from_positions, positions)
         points += len(positions)
         valid = [p for p in positions if p.get("valid") and p.get("latitude") is not None]
         last = max(valid, key=lambda p: p.get("fixTime") or "") if valid else last
-    km = round(km, 3)
-    positions = range(points)
+    if failed_hours == 24:
+        key = (device_id, day.isoformat())
+        GPS_DAY_FAILS[key] = GPS_DAY_FAILS.get(key, 0) + 1
+        if GPS_DAY_FAILS[key] < 2:
+            raise HTTPException(502, f"Traccar liefert für den {day:%d.%m.%Y} einen Fehler (Server-Fehler in Traccar)")
+        # zweimal ganz gescheitert: als Lücke speichern, damit der Monat fertig berechnet werden kann
     with db() as con:
-        con.execute("INSERT OR REPLACE INTO traccar_day_km(device_id, day, km, points, fetched_at) VALUES (?, ?, ?, ?, ?)",
-                    (device_id, day.isoformat(), km, len(positions), time.time()))
-    return km
+        con.execute("INSERT OR REPLACE INTO traccar_day_km(device_id, day, km, points, fetched_at, failed) VALUES (?, ?, ?, ?, ?, ?)",
+                    (device_id, day.isoformat(), round(km, 3), points, time.time(), failed_hours))
+    return round(km, 3)
 
 
+GPS_GAPS: dict = {}       # (Gerät, Monat) -> Stunden ohne Daten
 GPS_TASKS: set = set()   # Verweise halten – sonst kann Python laufende Tasks verwerfen
 
 
@@ -1615,9 +1635,10 @@ async def gps_month_km(device_id: int, month: str) -> tuple[Optional[float], lis
         return 0.0, []
     days = [start + timedelta(days=i) for i in range((min(end, today + timedelta(days=1)) - start).days)]
     with db() as con:
-        cached = {r["day"]: r["km"] for r in con.execute(
-            "SELECT day, km FROM traccar_day_km WHERE device_id = ? AND day >= ? AND day < ?",
-            (device_id, start.isoformat(), end.isoformat()))}
+        rows = con.execute("SELECT day, km, failed FROM traccar_day_km WHERE device_id = ? AND day >= ? AND day < ?",
+                           (device_id, start.isoformat(), end.isoformat())).fetchall()
+        cached = {r["day"]: r["km"] for r in rows}
+        GPS_GAPS[(device_id, month)] = sum(r["failed"] or 0 for r in rows)
     missing = [d for d in days if d.isoformat() not in cached and d < today]
     if today in days:
         cached[today.isoformat()] = await gps_day_km(device_id, today)
@@ -1646,6 +1667,10 @@ def gps_status():
 def traccar_refresh():
     with db() as con:
         con.execute("DELETE FROM traccar_km")
+        con.execute("DELETE FROM traccar_day_km WHERE failed > 0")   # Tage mit Lücken erneut versuchen
+    GPS_DAY_FAILS.clear()
+    for j in GPS_JOBS.values():
+        j["ended_at"] = 0
     return {"ok": True}
 
 
@@ -2039,6 +2064,7 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
                         km_m, miss = await gps_month_km(v["traccar_device_id"], k)
                         # unvollständige Monate (Tage noch in Berechnung) nicht als km ausweisen, sonst stimmen CHF/km nicht
                         series[k]["km"] = None if miss else km_m
+                        series[k]["gps_gap_hours"] = GPS_GAPS.get((v["traccar_device_id"], k), 0)
                         all_missing += miss
                     if all_missing:
                         job = start_gps_backfill(v["traccar_device_id"], all_missing)

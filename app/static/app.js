@@ -670,10 +670,12 @@ async function renderVehicles() {
 let vehPoll = null;
 function tcInfo(v) {
   const gp = v.gps_progress;
+  const gapH = (v.months || []).reduce((a, m) => a + (m.gps_gap_hours || 0), 0);
+  const gaps = v.km_source === "gps" && gapH ? ` · <span class="warn" title="Für diese Zeit liefert Traccar einen Fehler – „km neu laden“ versucht es erneut">${gapH >= 24 ? `${Math.round(gapH / 24 * 10) / 10} Tag(e)` : `${gapH} Std.`} ohne GPS-Daten</span>` : "";
   const gps = v.km_source === "gps" ? (gp ? (gp.running
       ? ` · <span class="warn">km aus GPS werden berechnet (${gp.done} von ${gp.total} Tagen${gp.current ? `, gerade ${fmtDate(gp.current)}` : ""})${gp.error ? " – letzter Fehler: " + esc(gp.error) : ""}</span>`
       : ` · <span class="neg">km aus GPS: Berechnung gestoppt (${gp.done} von ${gp.total} Tagen)${gp.error ? " – " + esc(gp.error) : ""} – neuer Versuch in 10 Minuten</span>`)
-    : " · km aus GPS") : "";
+    : " · km aus GPS") + gaps : "";
   return tcInfoBase(v) + gps;
 }
 function tcInfoBase(v) {
