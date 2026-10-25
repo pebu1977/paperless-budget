@@ -1545,33 +1545,66 @@ async def gps_day_km(device_id: int, day: date, force: bool = False) -> float:
                           (device_id, day.isoformat())).fetchone()
     if row and not force and (day < today or time.time() - row["fetched_at"] < 3600):
         return row["km"]
-    try:
-        r = await traccar_client().get("/api/positions", params={
-            "deviceId": device_id, "from": f"{day.isoformat()}T00:00:00Z", "to": f"{(day + timedelta(days=1)).isoformat()}T00:00:00Z"},
-            timeout=180)
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Traccar nicht erreichbar: {e}")
-    if r.status_code >= 400:
-        raise HTTPException(502, f"Traccar-Fehler {r.status_code} beim Laden der Positionen")
-    positions = r.json()
-    km = km_from_positions(positions)
+    import asyncio
+    # in 6-Stunden-Stücken laden: kleinere Antworten, weniger Zeitüberschreitungen bei vielen Positionen
+    km, points, last = 0.0, 0, None
+    for h in range(0, 24, 6):
+        t0 = datetime(day.year, day.month, day.day) + timedelta(hours=h)
+        t1 = t0 + timedelta(hours=6)
+        params = {"deviceId": device_id, "from": t0.strftime("%Y-%m-%dT%H:%M:%SZ"), "to": t1.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        r = None
+        # Routenbericht ist der offizielle Weg für historische Positionen; /api/positions mit Zeitraum als Ausweichweg
+        for path in ("/api/reports/route", "/api/positions"):
+            try:
+                r = await traccar_client().get(path, params=params, headers={"Accept": "application/json"}, timeout=180)
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"Traccar nicht erreichbar ({type(e).__name__}) am {day:%d.%m.%Y}")
+            if r.status_code < 400:
+                break
+        if r.status_code >= 400:
+            raise HTTPException(502, f"Traccar-Fehler {r.status_code} beim Laden der Positionen vom {day:%d.%m.%Y}: {r.text[:200]}")
+        # JSON auswerten und rechnen im Thread, damit die App währenddessen bedienbar bleibt
+        positions = await asyncio.to_thread(json.loads, r.content)
+        if last is not None:
+            positions = [last] + positions          # Strecke über die Stückgrenze hinweg mitzählen
+        km += await asyncio.to_thread(km_from_positions, positions)
+        points += len(positions)
+        valid = [p for p in positions if p.get("valid") and p.get("latitude") is not None]
+        last = max(valid, key=lambda p: p.get("fixTime") or "") if valid else last
+    km = round(km, 3)
+    positions = range(points)
     with db() as con:
         con.execute("INSERT OR REPLACE INTO traccar_day_km(device_id, day, km, points, fetched_at) VALUES (?, ?, ?, ?, ?)",
                     (device_id, day.isoformat(), km, len(positions), time.time()))
     return km
 
 
+GPS_TASKS: set = set()   # Verweise halten – sonst kann Python laufende Tasks verwerfen
+
+
 async def _gps_backfill(device_id: int, days: list[date]):
     job = GPS_JOBS.setdefault(device_id, {})
-    job.update(total=len(days), done=0, running=True, error=None)
+    job.update(total=len(days), done=0, running=True, error=None, failed=0, started=time.time(), progress_at=time.time())
+    fails = 0
     try:
         for d in days:
-            await gps_day_km(device_id, d)
+            job["current"] = d.isoformat()
+            try:
+                await gps_day_km(device_id, d)
+                fails = 0
+                job["error"] = None
+            except Exception as e:  # einzelner Tag fehlgeschlagen: weiter, beim nächsten Lauf erneut versuchen
+                fails += 1
+                job["failed"] += 1
+                job["error"] = str(getattr(e, "detail", e))
+                if fails >= 3:   # Traccar offenbar nicht erreichbar – abbrechen
+                    break
             job["done"] += 1
-    except Exception as e:  # pragma: no cover
-        job["error"] = str(getattr(e, "detail", e))
+            job["progress_at"] = time.time()
     finally:
         job["running"] = False
+        job["current"] = None
+        job["ended_at"] = time.time()
 
 
 async def gps_month_km(device_id: int, month: str) -> tuple[Optional[float], list[date]]:
@@ -1594,9 +1627,13 @@ async def gps_month_km(device_id: int, month: str) -> tuple[Optional[float], lis
 def start_gps_backfill(device_id: int, missing: list[date]) -> dict:
     import asyncio
     job = GPS_JOBS.get(device_id)
-    if missing and (not job or not job.get("running")):
-        GPS_JOBS[device_id] = {"total": len(missing), "done": 0, "running": True, "error": None}
-        asyncio.create_task(_gps_backfill(device_id, sorted(missing, reverse=True)))   # neueste Tage zuerst
+    stale = job and job.get("running") and time.time() - job.get("progress_at", 0) > 15 * 60   # hängt seit 15 min
+    cooling = job and not job.get("running") and job.get("error") and time.time() - job.get("ended_at", 0) < 600
+    if missing and not cooling and (not job or not job.get("running") or stale):
+        GPS_JOBS[device_id] = {"total": len(missing), "done": 0, "running": True, "error": None, "progress_at": time.time()}
+        task = asyncio.create_task(_gps_backfill(device_id, sorted(missing, reverse=True)))   # neueste Tage zuerst
+        GPS_TASKS.add(task)
+        task.add_done_callback(GPS_TASKS.discard)
     return GPS_JOBS.get(device_id, {})
 
 
@@ -2006,7 +2043,9 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
                     if all_missing:
                         job = start_gps_backfill(v["traccar_device_id"], all_missing)
                         gps_progress = {"missing": len(all_missing), "done": job.get("done", 0),
-                                        "total": job.get("total", len(all_missing)), "error": job.get("error")}
+                                        "total": job.get("total", len(all_missing)), "error": job.get("error"),
+                                        "current": job.get("current"), "failed": job.get("failed", 0),
+                                        "running": job.get("running", False)}
                 else:
                     for k in keys:
                         series[k]["km"] = await traccar_month_km(v["traccar_device_id"], k)

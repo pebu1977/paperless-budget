@@ -656,7 +656,7 @@ async function renderVehicles() {
   $("#vehList").innerHTML = rep.vehicles.map((v) => vehCard(v, entries.filter((e) => e.resolved_vehicle_id === v.id))).join("");
   rep.vehicles.forEach((v) => drawVehChart(v));
   clearTimeout(vehPoll);
-  if (rep.vehicles.some((v) => v.gps_progress && !v.gps_progress.error)) {
+  if (rep.vehicles.some((v) => v.gps_progress && v.gps_progress.running)) {
     vehPoll = setTimeout(() => { if (S.view === "vehicles") renderVehicles().catch(() => {}); }, 15000);
   }
   drawFuelDocs(docs);
@@ -670,7 +670,10 @@ async function renderVehicles() {
 let vehPoll = null;
 function tcInfo(v) {
   const gp = v.gps_progress;
-  const gps = v.km_source === "gps" ? (gp ? ` · <span class="warn">km aus GPS werden berechnet (${gp.done} von ${gp.total} Tagen)${gp.error ? " – Fehler: " + esc(gp.error) : ""}</span>` : " · km aus GPS") : "";
+  const gps = v.km_source === "gps" ? (gp ? (gp.running
+      ? ` · <span class="warn">km aus GPS werden berechnet (${gp.done} von ${gp.total} Tagen${gp.current ? `, gerade ${fmtDate(gp.current)}` : ""})${gp.error ? " – letzter Fehler: " + esc(gp.error) : ""}</span>`
+      : ` · <span class="neg">km aus GPS: Berechnung gestoppt (${gp.done} von ${gp.total} Tagen)${gp.error ? " – " + esc(gp.error) : ""} – neuer Versuch in 10 Minuten</span>`)
+    : " · km aus GPS") : "";
   return tcInfoBase(v) + gps;
 }
 function tcInfoBase(v) {
