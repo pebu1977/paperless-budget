@@ -28,6 +28,7 @@
       <button data-view="vehicles">Fahrzeuge</button>
       <button data-view="realestate">Immobilien</button>
       <button data-view="projects">Projekte</button>
+      <button data-view="contracts">Verträge <span id="ctBadge" class="badge" hidden></span></button>
       <button data-view="income">Einnahmen</button>
       <button data-view="settings">Einstellungen</button>
     </nav>
@@ -52,6 +53,11 @@
         <div class="kpi"><div class="kpi-label">Ausgaben</div><div class="kpi-value" id="kpiSpent">–</div><div class="kpi-sub" id="kpiDocs"></div></div>
         <div class="kpi"><div class="kpi-label">Saldo</div><div class="kpi-value" id="kpiBalance">–</div></div>
         <div class="kpi"><div class="kpi-label">Budget genutzt</div><div class="kpi-value" id="kpiBudget">–</div><div class="kpi-sub" id="kpiBudgetSub"></div></div>
+      </div>
+
+      <div class="card plan" id="planCard">
+        <div class="cardhead"><h3>Rest vom Lohn</h3><button id="planAdd">+ Vormerken</button></div>
+        <div id="planBody" class="muted small">Lade …</div>
       </div>
 
       <div class="grid2">
@@ -154,15 +160,10 @@
           <div id="stList"></div>
         </div>
         <div class="card">
-          <h3>Regeln (Händler → Kategorie)</h3>
-          <p class="muted small">Gilt für Buchungen ohne Rechnung. Das Stichwort wird im Händler, im Buchungstext und in der Karten-Nr. gesucht; mehrere Begriffe mit „+“ verbinden, z.B. <i>Tankomat + 1234</i>.</p>
-          <form id="ruleForm" class="ruleform">
-            <input name="keyword" placeholder="z.B. MIGROL" required>
-            <select name="category"></select>
-            <select name="vehicle"></select>
-            <button type="submit">Hinzufügen</button>
-          </form>
-          <div id="ruleList"></div>
+          <h3>Regeln</h3>
+          <p class="muted small">Buchungen ohne Rechnung automatisch einer Kategorie oder einem Fahrzeug zuordnen.</p>
+          <div id="bankRuleSummary" class="muted small"></div>
+          <a href="#" data-gosettings="bank">Regeln verwalten → Einstellungen</a>
         </div>
       </div>
 
@@ -208,6 +209,17 @@
           </form>
         </div>
       </div>
+      <div class="grid2">
+        <div class="card">
+          <div class="cardhead"><h3>Parkingpay-Auszüge</h3><button id="parkParseNew">Neue einlesen</button></div>
+          <div id="parkDocs"></div>
+        </div>
+        <div class="card">
+          <h3>Parkvorgänge ohne Fahrzeug</h3>
+          <p class="muted small">Kennzeichen unbekannt – unter <a href="#" data-gosettings="vehicles">Einstellungen → Fahrzeuge</a> das Kennzeichen beim Fahrzeug eintragen oder hier einzeln zuordnen.</p>
+          <div id="parkUnassigned"></div>
+        </div>
+      </div>
     </section>
 
     <!-- Immobilien -->
@@ -242,6 +254,25 @@
         <div class="card" id="prDetailCard">
           <div class="cardhead"><h3 id="prTitle">Projekt wählen</h3><button id="prSearch" hidden>+ Belege zuordnen</button></div>
           <div id="prDetail" class="muted small">Links ein Projekt anklicken.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Verträge & Kredite -->
+    <section id="view-contracts" class="view" hidden>
+      <div class="kpis" id="ctKpis"></div>
+      <div id="ctNotices"></div>
+      <div class="grid2 ct-grid">
+        <div class="card">
+          <div class="cardhead"><h3>Verträge</h3><button id="ctAddContract">+ Vertrag</button></div>
+          <div id="ctList"></div>
+          <div class="cardhead" style="margin-top:18px"><h3>Kredite</h3><button id="ctAddLoan">+ Kredit</button></div>
+          <div id="ctLoans"></div>
+          <label class="check small muted" style="display:block;margin-top:12px"><input type="checkbox" id="ctShowEnded"> beendete / inaktive anzeigen</label>
+        </div>
+        <div class="card" id="ctDetailCard">
+          <div class="cardhead"><h3 id="ctTitle">Vertrag wählen</h3></div>
+          <div id="ctDetail" class="muted small">Links einen Vertrag oder Kredit anklicken – oder mit <b>+ Vertrag</b> einen neuen anlegen.</div>
         </div>
       </div>
     </section>
@@ -284,47 +315,155 @@
 
     <!-- Einstellungen -->
     <section id="view-settings" class="view" hidden>
-      <div class="card">
-        <div class="cardhead">
-          <h3>Budget-Kategorien (Paperless-Tags)</h3>
-          <input id="tagSearch" type="search" placeholder="Tags filtern …">
+      <select class="set-mobile" id="setMobile" aria-label="Rubrik"></select>
+      <div class="set-wrap">
+        <nav class="set-nav" id="setNav">
+          <input type="search" id="setSearch" placeholder="Einstellung suchen …">
+          <div id="setLinks"></div>
+        </nav>
+        <div id="setPanels">
+
+          <div class="set-panel" data-panel="status" data-title="Verbindung & Status" data-ico="🔌">
+            <div id="setStatus" class="muted small">Prüfe Verbindungen …</div>
+          </div>
+
+          <div class="set-panel" data-panel="budget" data-title="Budget" data-ico="📊" hidden>
+            <div class="card">
+              <div class="cardhead"><h3>Budget-Kategorien (Paperless-Tags)</h3><input id="tagSearch" type="search" placeholder="Tags filtern …"></div>
+              <p class="muted small">Markierte Tags gelten als Kategorie. Hat ein Dokument mehrere, zählt der oberste. Monatsbudget leer lassen = kein Limit.</p>
+              <div id="catSettings" class="catsettings"></div>
+            </div>
+            <div class="card">
+              <h3>Nie im Budget berücksichtigen</h3>
+              <p class="muted small">Dokumente mit diesen Paperless-Tags zählen nie zum Budget (z.B. „Geschäft“). Einzelne Belege schliesst du direkt über das Häkchen aus.</p>
+              <div id="exclTags" class="chips"></div>
+            </div>
+            <div class="card">
+              <h3>Gründe für „nicht berücksichtigen“</h3>
+              <p class="muted small">Vorschläge, wenn du einen Beleg ausschliesst.</p>
+              <div class="field"><div class="lbl"><b>Gründe</b><span>einer pro Zeile</span></div><textarea id="setReasons" rows="5"></textarea></div>
+            </div>
+          </div>
+
+          <div class="set-panel" data-panel="docs" data-title="Belege & Erfassen" data-ico="🧾" hidden>
+            <div class="card">
+              <h3>Betrag in Paperless</h3>
+              <div class="field"><div class="lbl"><b>Betragsfeld</b><span>Custom Field vom Typ Währung mit dem Rechnungsbetrag</span></div><div><select id="setAmountField"></select></div></div>
+            </div>
+            <div class="card">
+              <h3>„Erfassen“-Ansicht eingrenzen</h3>
+              <p class="muted small">Welche Dokumente ohne Betrag sollen zum Nacherfassen erscheinen? Nichts gewählt = alle Dokumente des Monats.</p>
+              <div class="field"><div class="lbl"><b>Dokumenttypen</b></div><div id="reviewTypes" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>Tags</b></div><div id="reviewTags" class="chips"></div></div>
+            </div>
+          </div>
+
+          <div class="set-panel" data-panel="bank" data-title="Bank & Abgleich" data-ico="🏦" hidden>
+            <div class="card">
+              <h3>Kontoauszüge erkennen</h3>
+              <div class="field"><div class="lbl"><b>Dokumenttypen</b><span>Dokumente dieses Typs werden als Kontoauszug gelesen</span></div><div id="stTypes" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>oder Tags</b><span>optional</span></div><div id="stTags" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>Zeitfenster</b><span>Rechnung höchstens so viele Tage vor der Zahlung</span></div><div><input id="matchWindow" type="number" min="5" max="365" step="5" style="width:90px"> Tage</div></div>
+            </div>
+            <div class="card">
+              <h3>Bei einem Treffer in Paperless setzen</h3>
+              <div class="field"><div class="lbl"><b>Tag</b><span>wird an die bezahlte Rechnung gehängt</span></div><div><select id="setPaidTag"></select></div></div>
+              <div class="field"><div class="lbl"><b>Datumsfeld</b><span>bekommt das Zahlungsdatum</span></div><div><select id="setPaidField"></select></div></div>
+            </div>
+            <div class="card">
+              <h3>Regeln (Händler → Kategorie / Fahrzeug)</h3>
+              <p class="muted small">Gilt für Buchungen ohne Rechnung. Das Stichwort wird im Händler, im Buchungstext und in der Karten-Nr. gesucht; mehrere Begriffe mit „+“ verbinden, z.B. <i>Tankomat + 1234</i>.</p>
+              <form id="ruleForm" class="ruleform">
+                <input name="keyword" placeholder="z.B. MIGROL" required>
+                <select name="category"></select>
+                <select name="vehicle"></select>
+                <button type="submit">Hinzufügen</button>
+              </form>
+              <div id="ruleList"></div>
+            </div>
+          </div>
+
+          <div class="set-panel" data-panel="plan" data-title="Vormerkungen & Lohn" data-ico="🛒" hidden>
+            <div class="card">
+              <h3>Bestellungen vormerken</h3>
+              <p class="muted small">Bestellbestätigungen mit diesem Tag (z.B. per Paperless-Mail-Regel) werden in der Übersicht vorgemerkt, bis Rechnung oder Abbuchung da ist. Sie zählen nie als Ausgabe.</p>
+              <div class="field"><div class="lbl"><b>Tag für Bestellungen</b></div><div class="row"><select id="setOrderTag"></select><button id="setOrderTagCreate" class="linkbtn" hidden>in Paperless anlegen</button></div></div>
+              <div class="field"><div class="lbl"><b>Rechnung erwartet nach</b><span>Tage nach der Bestellung</span></div><div><input id="setExpectDays" type="number" min="1" max="120" style="width:90px"> Tage</div></div>
+            </div>
+            <div class="card">
+              <h3>Lohn</h3>
+              <p class="muted small">„Rest vom Lohn“ rechnet mit den Einnahmen des Monats. Den Lohn als wiederkehrende Einnahme unter <a href="#" data-goto="income">Einnahmen</a> erfassen.</p>
+            </div>
+          </div>
+
+          <div class="set-panel" data-panel="vehicles" data-title="Fahrzeuge" data-ico="🚗" hidden>
+            <div class="card">
+              <div class="cardhead"><h3>Fahrzeuge</h3><button id="vehAdd">+ Fahrzeug</button></div>
+              <p class="muted small">Kosten kommen aus Tankkarten-Rechnungen (über die Karten-Nr.), Paperless-Belegen mit dem Fahrzeug-Tag und Bankbuchungen, die im Abgleich (oder per Regel) dem Fahrzeug zugeordnet sind. Kilometer aus Traccar.</p>
+              <div id="vehSettings"></div>
+            </div>
+            <div class="card">
+              <h3>Tankkarten-Rechnungen erkennen</h3>
+              <div class="field"><div class="lbl"><b>Korrespondent</b><span>z.B. Vögtlin-Meyer</span></div><div id="fuelCorr" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>oder Tag</b></div><div id="fuelTags" class="chips"></div></div>
+            </div>
+            <div class="card">
+              <h3>Parkingpay-Auszüge erkennen</h3>
+              <p class="muted small">Die Parkvorgänge werden über das <b>Kennzeichen</b> dem Fahrzeug zugeordnet und zählen zu dessen Kosten.
+                Im Budget zählt weiterhin die Zahlung an Parkingpay (Aufladung bzw. Rechnung) – darum die Aufladungen <b>keinem Fahrzeug</b> zuordnen.</p>
+              <div class="field"><div class="lbl"><b>Korrespondent</b><span>z.B. Digitalparking / Parkingpay</span></div><div id="parkCorr" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>oder Tag</b></div><div id="parkTags" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>Monatsbericht automatisch holen</b><span>optional: Link zum Monatsbericht aus dem Parkingpay-Konto (…/monthly-report/JJJJ/M?key=…). Enthält einen persönlichen Schlüssel – wie ein Passwort behandeln.</span></div>
+                <div><input id="setPpUrl" type="password" autocomplete="off" placeholder="https://parkingpay.ch/ui-api/customer-account/monthly-report/…" style="width:100%"></div></div>
+              <div class="field"><div class="lbl"><b>Holen ab Monat</b><span>abgeschlossene Monate werden einmal geholt und in Paperless abgelegt</span></div>
+                <div class="row"><input id="setPpStart" type="month"><button id="setPpFetch">jetzt holen</button><button id="setPpClear" class="linkbtn danger" hidden>Link entfernen</button></div></div>
+              <div id="setPpInfo" class="muted small"></div>
+            </div>
+          </div>
+
+          <div class="set-panel" data-panel="contracts" data-title="Verträge" data-ico="📄" hidden>
+            <div class="card">
+              <h3>Kündigungstermine</h3>
+              <div class="field"><div class="lbl"><b>Hervorheben ab</b><span>so viele Tage vor dem Termin</span></div><div><input id="setNoticeDays" type="number" min="7" max="365" style="width:90px"> Tage</div></div>
+              <div class="field"><div class="lbl"><b>Zahl am Tab ab</b><span>dringend, so viele Tage vor dem Termin</span></div><div><input id="setBadgeDays" type="number" min="1" max="180" style="width:90px"> Tage</div></div>
+            </div>
+            <div class="card">
+              <h3>Kategorien</h3>
+              <div class="field"><div class="lbl"><b>Verträge</b><span>eine pro Zeile</span></div><textarea id="setCtCats" rows="6"></textarea></div>
+              <div class="field"><div class="lbl"><b>Kredite</b><span>eine pro Zeile</span></div><textarea id="setLoanCats" rows="4"></textarea></div>
+            </div>
+          </div>
+
+          <div class="set-panel" data-panel="realestate" data-title="Immobilien & Projekte" data-ico="🏠" hidden>
+            <div class="card">
+              <h3>Nebenkostenabrechnung</h3>
+              <div class="field"><div class="lbl"><b>Tag in Paperless</b><span>für abgelegte Abrechnungen (wird bei Bedarf angelegt)</span></div><div><input id="setNkTag"></div></div>
+            </div>
+            <div class="card"><h3>Häuser</h3><div id="setProps" class="muted small">–</div></div>
+            <div class="card"><h3>Projekte</h3><div id="setProjects" class="muted small">–</div></div>
+          </div>
+
+          <div class="set-panel" data-panel="data" data-title="Daten & Wartung" data-ico="💾" hidden>
+            <div class="card">
+              <h3>Backup</h3>
+              <p class="muted small">Alles, was die App selbst speichert (Kategorien, Budgets, Buchungen, Fahrzeuge, Häuser, Verträge …). Belege und Dokumente liegen in Paperless.</p>
+              <div class="field"><div class="lbl"><b>Backup herunterladen</b><span id="setLastBackup"></span></div><div><a class="btnlink" href="/api/backup" id="setBackup">Backup herunterladen</a></div></div>
+              <div class="field"><div class="lbl"><b>Backup einspielen</b><span>ersetzt alle Daten der App; die aktuelle Datenbank wird vorher gesichert</span></div><div><input type="file" id="setRestore" accept=".db"></div></div>
+            </div>
+            <div class="card">
+              <h3>Export (CSV für Excel)</h3>
+              <div class="field"><div class="lbl"><b>Jahr</b></div><div><select id="setExportYear"></select></div></div>
+              <div class="row" style="flex-wrap:wrap"><a class="btnlink" data-export="ausgaben">Ausgaben</a><a class="btnlink" data-export="buchungen">Bankbuchungen</a><a class="btnlink" data-export="vertraege">Verträge & Kredite</a></div>
+            </div>
+            <div class="card">
+              <h3>Zwischenspeicher</h3>
+              <div class="field"><div class="lbl"><b>Paperless neu laden</b><span>nach neuen Tags, Feldern oder Korrespondenten</span></div><div><button id="setRefreshMeta">neu laden</button></div></div>
+              <div class="field"><div class="lbl"><b>Kilometer neu laden</b><span>Traccar-Werte neu abrufen</span></div><div><button id="setRefreshKm">neu laden</button></div></div>
+            </div>
+          </div>
+
         </div>
-        <p class="muted small">Markierte Tags gelten als Kategorie. Hat ein Dokument mehrere, zählt der oberste. Monatsbudget leer lassen = kein Limit.</p>
-        <div id="catSettings" class="catsettings"></div>
       </div>
-      <div class="card">
-        <h3>Nie im Budget berücksichtigen</h3>
-        <p class="muted small">Dokumente mit diesen Paperless-Tags zählen nie zum Budget (z.B. „Geschäft“). Einzelne Belege schliesst du direkt über das Häkchen aus.</p>
-        <div id="exclTags" class="chips"></div>
-      </div>
-      <div class="card">
-        <h3>„Erfassen“-Ansicht eingrenzen</h3>
-        <p class="muted small">Welche Dokumente ohne Betrag sollen zum Nacherfassen erscheinen? Nichts gewählt = alle Dokumente des Monats.</p>
-        <div class="grid2 tight">
-          <div><h4>Dokumenttypen</h4><div id="reviewTypes" class="chips"></div></div>
-          <div><h4>Tags</h4><div id="reviewTags" class="chips"></div></div>
-        </div>
-      </div>
-      <div class="card">
-        <h3>Kontoauszüge &amp; Abgleich</h3>
-        <p class="muted small">Woran erkennt die App Kontoauszüge? Bei einem Treffer setzt sie an der Rechnung den Tag <b id="paidTagName"></b> und das Datumsfeld <b id="paidFieldName"></b> (werden bei Bedarf angelegt).</p>
-        <div class="grid2 tight">
-          <div><h4>Dokumenttypen</h4><div id="stTypes" class="chips"></div></div>
-          <div><h4>Tags</h4><div id="stTags" class="chips"></div></div>
-        </div>
-        <label class="inline">Rechnung höchstens <input id="matchWindow" type="number" min="5" max="365" step="5"> Tage vor der Zahlung</label>
-      </div>
-      <div class="card">
-        <div class="cardhead"><h3>Fahrzeuge</h3><button id="vehAdd">+ Fahrzeug</button></div>
-        <p class="muted small">Kosten kommen aus Tankkarten-Rechnungen (über die Karten-Nr.), Paperless-Belegen mit dem Fahrzeug-Tag und Bankbuchungen, die im Abgleich (oder per Regel) dem Fahrzeug zugeordnet sind. Kilometer aus Traccar. Fahrzeuge werden sofort gespeichert.</p>
-        <div id="vehSettings"></div>
-        <h4 style="margin-top:18px">Tankkarten-Rechnungen erkennen</h4>
-        <div class="grid2 tight">
-          <div><div class="muted small">Korrespondent (z.B. Vögtlin-Meyer)</div><div id="fuelCorr" class="chips"></div></div>
-          <div><div class="muted small">oder Tag</div><div id="fuelTags" class="chips"></div></div>
-        </div>
-      </div>
-      <div class="savebar"><button id="saveSettings" class="primary">Einstellungen speichern</button></div>
     </section>
   </main>
 
@@ -373,8 +512,30 @@
       <div class="row" style="justify-content:flex-end"><button id="seClose">Schliessen</button></div>
     </div>
   </dialog>
+  <dialog id="orderDlg">
+    <form class="form" method="dialog" id="orderForm">
+      <h3 id="odTitle">Ausgabe vormerken</h3>
+      <p class="muted small">Zum Beispiel eine Bestellung, deren Rechnung oder Abbuchung noch kommt. Sobald sie da ist, wird die Vormerkung automatisch erledigt.</p>
+      <label>Händler / Shop<input name="merchant" required list="odMerchants" placeholder="z.B. Galaxus"></label>
+      <datalist id="odMerchants"></datalist>
+      <label>Was<input name="description" placeholder="z.B. Kopfhörer"></label>
+      <div class="row">
+        <label style="flex:1">Betrag CHF<input name="amount" type="number" step="0.05" inputmode="decimal"></label>
+        <label style="flex:1">Bestellt am<input name="date" type="date"></label>
+        <label style="flex:1">Erwartet am<input name="expected" type="date"></label>
+      </div>
+      <label>Notiz<input name="note"></label>
+      <div class="row" style="justify-content:space-between">
+        <span><button type="button" class="linkbtn danger" id="odDelete" hidden>löschen</button></span>
+        <span class="row"><button value="cancel" formnovalidate>Abbrechen</button><button value="ok" class="primary">Speichern</button></span>
+      </div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" hidden></div>
   <script src="app.js"></script>
   <script src="re.js"></script>
+  <script src="contracts.js"></script>
+  <script src="plan.js"></script>
+  <script src="settings.js"></script>
 </body>
 </html>

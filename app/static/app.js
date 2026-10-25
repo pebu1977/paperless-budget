@@ -137,7 +137,8 @@ async function render() {
     if (S.view === "vehicles") await renderVehicles();
     if (S.view === "realestate") await renderRE();
     if (S.view === "projects") await renderProjects();
-    if (S.view === "settings") renderSettings();
+    if (S.view === "contracts") await renderContracts();
+    if (S.view === "settings") await renderSettings();
   } catch (e) { showAlert(e.message); }
   updateReviewBadge();
 }
@@ -166,6 +167,7 @@ async function renderOverview() {
     + (sum.excluded && sum.excluded.count ? ` · <a href="#" id="kpiExcl">${sum.excluded.count} nicht berücksichtigt (${esc(fmt(sum.excluded.amount))})</a>` : "");
   const ke = $("#kpiExcl"); if (ke) ke.onclick = (e) => { e.preventDefault(); $("#ovFilter").value = "out"; drawOvItems(); $("#ovItems").scrollIntoView({ behavior: "smooth", block: "center" }); };
   ovItems = await api(`/api/month-items?month=${S.month}`).catch(() => []); ovShowAll = false; drawOvItems();
+  renderPlan();
   const bal = $("#kpiBalance"); bal.textContent = fmt(sum.balance); bal.className = "kpi-value " + (sum.balance >= 0 ? "pos" : "neg");
   const budgetedSpent = sum.categories.filter((c) => c.budget != null).reduce((a, c) => a + c.spent, 0);
   if (sum.total_budget > 0) {
@@ -449,7 +451,8 @@ async function renderBank() {
     api(`/api/transactions?month=${S.month}`), api("/api/statements"), api("/api/rules"), api("/api/open-invoices").catch(() => []),
   ]);
   txs = list;
-  drawTx(); drawStatements(statements); drawRules(rules); drawOpenInvoices(openInv);
+  drawTx(); drawStatements(statements); drawOpenInvoices(openInv);
+  $("#bankRuleSummary").textContent = rules.length ? `${rules.length} Regel(n) aktiv: ${rules.slice(0, 6).map((r) => r.keyword).join(", ")}${rules.length > 6 ? " …" : ""}` : "Noch keine Regeln.";
 }
 
 const txKind = (t) => t.status === "ignored" ? "ignored" : t.status === "matched" ? "matched" : t.amount > 0 ? "credit" : t.candidates.length ? "suggest" : "nodoc";
@@ -507,7 +510,7 @@ function txRow(t) {
   }
   return `<div class="tx ${k}" data-id="${t.id}">
     <div class="tx-date">${fmtDate(t.date)}</div>
-    <div style="min-width:0"><div class="tx-merchant">${esc(t.merchant || t.text.split(" · ")[0])}${t.rent ? ` <span class="allocb">🏠 Miete ${esc(t.rent.tenant_name)} ${esc(t.rent.month)}</span>` : ""}${allocBadges({ ...t, amount: t.abs_amount })}</div><div class="tx-text" title="${esc(t.text)}">${esc(t.text)}</div></div>
+    <div style="min-width:0"><div class="tx-merchant">${esc(t.merchant || t.text.split(" · ")[0])}${t.rent ? ` <span class="allocb">🏠 Miete ${esc(t.rent.tenant_name)} ${esc(t.rent.month)}</span>` : ""}${t.contract ? ` <span class="allocb">${t.contract.kind === "kredit" ? "🏦" : "📄"} ${esc(t.contract.name)}</span>` : ""}${allocBadges({ ...t, amount: t.abs_amount })}</div><div class="tx-text" title="${esc(t.text)}">${esc(t.text)}</div></div>
     <div class="tx-amt ${t.amount > 0 ? "credit" : ""}">${fmt(t.amount)}${unchecked}</div>
     <div class="tx-act">${act}</div>
   </div>`;
@@ -602,12 +605,12 @@ $("#ruleForm").onsubmit = async (e) => {
   try {
     const r = await api("/api/rules", { method: "POST", body: JSON.stringify({
       keyword: f.keyword.value, category_tag_id: cat && cat !== "ignore" ? Number(cat) : null, ignore: cat === "ignore", vehicle_id: vid ? Number(vid) : null }) });
-    f.reset(); toast(`Regel angelegt – ${r.applied} Buchung(en) angepasst`); await renderBank();
+    f.reset(); toast(`Regel angelegt – ${r.applied} Buchung(en) angepasst`); drawRules(await api("/api/rules"));
   } catch (err) { toast(err.message, true); }
 };
 $("#ruleList").addEventListener("click", async (e) => {
   const id = e.target.dataset.delrule; if (!id) return;
-  await api(`/api/rules/${id}`, { method: "DELETE" }); renderBank();
+  await api(`/api/rules/${id}`, { method: "DELETE" }); drawRules(await api("/api/rules"));
 });
 
 let openInvList = [];
@@ -640,10 +643,11 @@ async function renderVehicles() {
   const { until, months } = vehPeriod();
   const from = shiftMonth(until, -(months - 1));
   $("#vehPeriod").textContent = `${monthLabel(from)} – ${monthLabel(until)}`;
-  const [rep, docs, entries] = await Promise.all([
+  const [rep, docs, entries, pdocs] = await Promise.all([
     S.vehicles.length ? api(`/api/vehicles/report?until=${until}&months=${months}`) : Promise.resolve({ vehicles: [] }),
     api("/api/fuel-docs"),
     api(`/api/fuel-entries?month_from=${from}&month_to=${until}`),
+    api("/api/parking-docs").catch(() => []),
   ]);
   const va = $("#vehAlert");
   va.hidden = !rep.traccar_error && rep.traccar_configured !== false;
@@ -651,13 +655,25 @@ async function renderVehicles() {
   Object.keys(S.charts).filter((k) => k.startsWith("veh")).forEach((k) => { S.charts[k].destroy(); delete S.charts[k]; });
   $("#vehList").innerHTML = rep.vehicles.map((v) => vehCard(v, entries.filter((e) => e.resolved_vehicle_id === v.id))).join("");
   rep.vehicles.forEach((v) => drawVehChart(v));
+  clearTimeout(vehPoll);
+  if (rep.vehicles.some((v) => v.gps_progress && !v.gps_progress.error)) {
+    vehPoll = setTimeout(() => { if (S.view === "vehicles") renderVehicles().catch(() => {}); }, 15000);
+  }
   drawFuelDocs(docs);
+  drawParking(pdocs, rep.parking_unassigned || []);
+  parkingAuto(pdocs);
   const ff = $("#fuelForm");
   ff.vehicle_id.innerHTML = vehicleOptions(null, "wählen …");
   if (!ff.date.value) ff.date.value = new Date().toISOString().slice(0, 10);
 }
 
+let vehPoll = null;
 function tcInfo(v) {
+  const gp = v.gps_progress;
+  const gps = v.km_source === "gps" ? (gp ? ` · <span class="warn">km aus GPS werden berechnet (${gp.done} von ${gp.total} Tagen)${gp.error ? " – Fehler: " + esc(gp.error) : ""}</span>` : " · km aus GPS") : "";
+  return tcInfoBase(v) + gps;
+}
+function tcInfoBase(v) {
   if (!v.traccar_device_id) return " · kein Traccar-Gerät zugewiesen";
   if (v.traccar_device_missing) return ` · <span class="neg">Traccar-Gerät ${v.traccar_device_id} existiert nicht (mehr) – unter Einstellungen neu wählen</span>`;
   if (!v.traccar_last_update) return v.traccar_device_name ? ` · Traccar: ${esc(v.traccar_device_name)} · noch nie gemeldet` : "";
@@ -675,7 +691,7 @@ function vehCard(v, entries) {
   return `<div class="card veh">
     <div class="veh-head"><h3>${esc(v.name)}</h3><span class="muted small">${esc(v.energy)}${tcInfo(v)}</span></div>
     <div class="veh-kpis">
-      ${kpi("Kosten", fmt(v.cost), `davon Treibstoff ${fmt(v.fuel_total)}`)}
+      ${kpi("Kosten", fmt(v.cost), `davon Treibstoff ${fmt(v.fuel_total)}${v.parking_cost ? ` · Parkieren ${fmt(v.parking_cost)}` : ""}`)}
       ${kpi("Gefahren", fmtKm(v.km))}
       ${kpi("Kosten / km", v.cost_per_km == null ? "–" : fmt(v.cost_per_km).replace(/(\.\d\d)$/, "$1"), "alle Kosten")}
       ${kpi("Treibstoff / km", v.fuel_per_km == null ? "–" : fmt(v.fuel_per_km))}
@@ -703,6 +719,7 @@ function drawVehChart(v) {
         { type: "bar", label: "Treibstoff", data: v.months.map((m) => m.fuel_total), backgroundColor: "#e0a82ecc", stack: "c", yAxisID: "y", order: 2 },
         { type: "bar", label: "Belege", data: v.months.map((m) => m.doc_cost), backgroundColor: "#1565c0cc", stack: "c", yAxisID: "y", order: 2 },
         { type: "bar", label: "Bank", data: v.months.map((m) => m.bank_cost), backgroundColor: "#8e8e8ecc", stack: "c", yAxisID: "y", order: 2 },
+        ...(v.parking_cost ? [{ type: "bar", label: "Parkieren", data: v.months.map((m) => m.parking_cost), backgroundColor: "#7b5ea7cc", stack: "c", yAxisID: "y", order: 2 }] : []),
         { type: "line", label: "km", data: v.months.map((m) => m.km), borderColor: css("--accent"), backgroundColor: css("--accent"), yAxisID: "km", tension: 0, pointRadius: 3, order: 1, spanGaps: true },
       ],
     },
@@ -740,6 +757,56 @@ function drawFuelDocs(list) {
         <button data-fparse="${d.id}" ${d.parsed_at ? "" : 'class="primary"'}>${d.parsed_at ? "Neu einlesen" : "Einlesen"}</button></div>`).join("")
     : `<div class="empty">Keine Tankkarten-Rechnungen gefunden.</div>`;
 }
+function drawParking(list, unassigned) {
+  const configured = (S.settings.parking_correspondent_ids || []).length || (S.settings.parking_tag_ids || []).length;
+  $("#parkDocs").innerHTML = !configured
+    ? `<div class="muted small">Unter <a href="#" data-gosettings="vehicles">Einstellungen → Fahrzeuge</a> den Korrespondenten der Parkingpay-Auszüge wählen und bei den Fahrzeugen die Kennzeichen eintragen.</div>`
+    : list.length ? list.slice(0, 24).map((d) => `<div class="stitem">
+        <div><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a><div class="muted small">${fmtDate(d.date)} · ${d.parsed_at ? `${d.entries} Parkvorgänge` : "noch nicht eingelesen"}</div></div>
+        <button data-pparse="${d.id}" ${d.parsed_at ? "" : 'class="primary"'}>${d.parsed_at ? "Neu einlesen" : "Einlesen"}</button></div>`).join("")
+    : `<div class="empty">Keine Parkingpay-Auszüge gefunden.</div>`;
+  $("#parkUnassigned").innerHTML = unassigned.length ? unassigned.map((e) => `<div class="invitem" data-pe="${e.id}">
+      <span>${fmtDate(e.date)}${e.time ? " " + esc(e.time) : ""} · <b>${esc(e.plate || "ohne Kennzeichen")}</b>${e.driver ? ` (${esc(e.driver)})` : ""} <span class="muted small">${esc(e.location || "")}</span></span>
+      <span class="row"><b class="num">${fmt(e.amount)}</b><select class="pe-veh">${vehicleOptions(null, "Fahrzeug …")}</select></span></div>`).join("")
+    : `<div class="muted small">Alle Parkvorgänge sind einem Fahrzeug zugeordnet.</div>`;
+}
+let parkAutoDone = false;
+async function parkingAuto(pdocs) {
+  // einmal pro Seitenaufruf: neue Monatsberichte holen (falls Link hinterlegt) und ungelesene Auszüge einlesen
+  if (parkAutoDone) return; parkAutoDone = true;
+  try {
+    const f = await api("/api/parking/fetch?auto=true", { method: "POST" });
+    if (f.fetched?.length) toast(`${f.fetched.length} Parkingpay-Monatsbericht(e) geholt – Paperless verarbeitet sie`);
+    if (pdocs.some((d) => !d.parsed_at)) {
+      const r = await api("/api/parking-docs/parse-new", { method: "POST" });
+      if (r.parsed) { parkResultToast(r.results); if (S.view === "vehicles") renderVehicles(); }
+    }
+  } catch {}
+}
+function parkResultToast(results) {
+  const plates = results.flatMap((r) => r.plates), unknown = plates.filter((p) => !p.vehicle_id);
+  const n = results.reduce((a, r) => a + r.found, 0);
+  toast(`${n} Parkvorgänge gelesen` + (unknown.length ? ` · ohne Fahrzeug: ${unknown.map((p) => (p.plate || "?") + (p.driver ? ` (${p.driver})` : "")).join(", ")}` : "")
+    + (n === 0 ? " – Format nicht erkannt? Bitte einen Auszug als Beispiel schicken." : ""), unknown.length > 0 || n === 0);
+}
+$("#parkDocs").addEventListener("click", async (e) => {
+  const id = e.target.dataset.pparse; if (!id) return;
+  e.target.disabled = true;
+  try { parkResultToast([await api(`/api/parking-docs/${id}/parse`, { method: "POST" })]); await renderVehicles(); }
+  catch (err) { e.target.disabled = false; toast(err.message, true); }
+});
+$("#parkParseNew").onclick = async (e) => {
+  e.target.disabled = true;
+  try { const r = await api("/api/parking-docs/parse-new", { method: "POST" }); r.parsed ? parkResultToast(r.results) : toast("Keine neuen Auszüge"); await renderVehicles(); }
+  catch (err) { toast(err.message, true); }
+  e.target.disabled = false;
+};
+$("#parkUnassigned").addEventListener("change", async (e) => {
+  if (!e.target.classList.contains("pe-veh") || !e.target.value) return;
+  const id = e.target.closest("[data-pe]").dataset.pe;
+  try { await api(`/api/parking-entries/${id}`, { method: "PUT", body: JSON.stringify({ vehicle_id: Number(e.target.value) }) }); toast("Zugeordnet"); renderVehicles(); }
+  catch (err) { toast(err.message, true); }
+});
 function fuelResultToast(results) {
   const cards = results.flatMap((r) => r.cards);
   const unknown = cards.filter((c) => !c.vehicle_id);
@@ -770,137 +837,6 @@ $("#fuelForm").onsubmit = async (e) => {
 };
 
 // --- Verwaltung (Einstellungen)
-async function loadTraccarDevices() {
-  if (S.traccarDevices !== null) return;
-  try { S.traccarDevices = await api("/api/traccar/devices"); S.traccarError = S.traccarDevices.length ? null : "Traccar meldet keine Geräte für diesen Benutzer."; }
-  catch (e) { S.traccarDevices = []; S.traccarError = e.message; }
-  renderVehicleSettings();
-}
-function renderVehicleSettings() {
-  loadTraccarDevices();
-  const devs = S.traccarDevices || [];
-  const tagOpts = (sel) => `<option value="">– kein Tag –</option>` + S.meta.tags.map((t) => `<option value="${t.id}" ${t.id === sel ? "selected" : ""}>${esc(t.name)}</option>`).join("");
-  const devOpts = (sel) => `<option value="">– kein Gerät –</option>` + devs.map((d) => `<option value="${d.id}" ${d.id === sel ? "selected" : ""}>${esc(d.name)}</option>`).join("")
-    + (sel && !devs.some((d) => d.id === sel) ? `<option value="${sel}" selected>Gerät ${sel}</option>` : "");
-  const row = (v) => `<div class="vs-row" data-id="${v.id ?? ""}">
-      <input name="name" value="${esc(v.name || "")}" placeholder="Name, z.B. Golf">
-      <select name="energy">${ENERGIES.map((x) => `<option ${x === (v.energy || "Benzin") ? "selected" : ""}>${x}</option>`).join("")}</select>
-      <select name="traccar">${devOpts(v.traccar_device_id)}</select>
-      <select name="tag">${tagOpts(v.tag_id)}</select>
-      <input name="cards" value="${esc(v.card_keys || "")}" placeholder="Tankkarten-Nr., z.B. 2345600">
-      <button class="primary" data-vsave>Speichern</button>
-      ${v.id ? `<button class="linkbtn danger" data-vdel>löschen</button>` : `<button class="linkbtn" data-vcancel>abbrechen</button>`}
-    </div>`;
-  const tcHint = S.traccarError ? `<div class="alert" style="margin:8px 0">Traccar: ${esc(S.traccarError)}
-      <button class="linkbtn" id="tcRetry">erneut versuchen</button></div>` : "";
-  const head = tcHint + `<div class="vs-row vs-head"><span>Name</span><span>Antrieb</span><span>Traccar-Gerät${devs.length ? "" : " (nicht erreichbar)"}</span><span>Paperless-Tag</span><span>Tankkarte(n)</span><span></span><span></span></div>`;
-  $("#vehSettings").innerHTML = head + (S.vehicles.map(row).join("") || "") + (S.newVehicle ? row({}) : "") +
-    (!S.vehicles.length && !S.newVehicle ? `<div class="empty">Noch kein Fahrzeug.</div>` : "");
-}
-$("#vehAdd").onclick = () => { S.newVehicle = true; renderVehicleSettings(); };
-document.addEventListener("click", (e) => { if (e.target.id === "tcRetry") { S.traccarDevices = null; loadTraccarDevices(); } });
-$("#vehSettings").addEventListener("click", async (e) => {
-  const r = e.target.closest(".vs-row"); if (!r) return;
-  const id = r.dataset.id;
-  try {
-    if (e.target.hasAttribute("data-vcancel")) { S.newVehicle = false; renderVehicleSettings(); return; }
-    if (e.target.hasAttribute("data-vdel")) {
-      if (!confirm("Fahrzeug löschen? Zuordnungen von Buchungen und Regeln werden entfernt.")) return;
-      await api(`/api/vehicles/${id}`, { method: "DELETE" });
-    } else if (e.target.hasAttribute("data-vsave")) {
-      const q = (n) => r.querySelector(`[name=${n}]`).value;
-      if (!q("name").trim()) { toast("Name angeben", true); return; }
-      const body = { name: q("name"), energy: q("energy"), traccar_device_id: q("traccar") ? Number(q("traccar")) : null,
-        tag_id: q("tag") ? Number(q("tag")) : null, card_keys: q("cards") || null, active: true };
-      await api(id ? `/api/vehicles/${id}` : "/api/vehicles", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
-      S.newVehicle = false;
-    } else return;
-    S.vehicles = await api("/api/vehicles"); renderVehicleSettings(); toast("Fahrzeuge gespeichert");
-  } catch (err) { toast(err.message, true); }
-});
-
-// ------------------------------------------------------------ Einstellungen
-let draft = null;
-function renderSettings() {
-  if (!draft) draft = {
-    cats: [...S.settings.category_tag_ids],
-    budgets: { ...S.budgets },
-    types: new Set(S.settings.review_document_type_ids),
-    tags: new Set(S.settings.review_tag_ids),
-    stTypes: new Set(S.settings.statement_document_type_ids || []),
-    stTags: new Set(S.settings.statement_tag_ids || []),
-    window: S.settings.match_window_days || 60,
-    fuelCorr: new Set(S.settings.fuel_correspondent_ids || []),
-    exclTags: new Set(S.settings.exclude_tag_ids || []),
-    fuelTags: new Set(S.settings.fuel_tag_ids || []),
-  };
-  const q = $("#tagSearch").value.trim().toLowerCase();
-  const match = (t) => !q || t.name.toLowerCase().includes(q);
-  const on = draft.cats.map(tag).filter(Boolean).filter(match);
-  const off = S.meta.tags.filter((t) => !draft.cats.includes(t.id) && match(t)).sort((a, b) => a.name.localeCompare(b.name, "de"));
-  const row = (t, active, i) => `<div class="cs-row ${active ? "" : "off"}" data-id="${t.id}">
-      <input type="checkbox" class="cs-on" ${active ? "checked" : ""}>
-      <span class="cs-name"><span class="dot" style="background:${esc(t.color)}"></span>${esc(t.name)}</span>
-      <span class="cs-budget"><input type="number" step="10" min="0" placeholder="Budget/Monat" value="${draft.budgets[t.id] ?? ""}"></span>
-      <span class="cs-move"><button data-mv="-1" ${i === 0 ? "disabled" : ""}>↑</button><button data-mv="1" ${i === on.length - 1 ? "disabled" : ""}>↓</button></span>
-    </div>`;
-  $("#catSettings").innerHTML =
-    (on.length ? on.map((t, i) => row(t, true, i)).join("") : `<div class="empty">Noch keine Kategorie gewählt.</div>`) +
-    (off.length ? `<div class="cs-sep">Weitere Tags</div>` + off.map((t) => row(t, false, -1)).join("") : "");
-
-  const chips = (items, set, attr) => items.map((x) => `<label class="chip ${set.has(x.id) ? "on" : ""}"><input type="checkbox" data-${attr}="${x.id}" ${set.has(x.id) ? "checked" : ""}>${esc(x.name)}</label>`).join("") || `<span class="muted small">keine vorhanden</span>`;
-  $("#reviewTypes").innerHTML = chips(S.meta.document_types, draft.types, "type");
-  $("#reviewTags").innerHTML = chips(S.meta.tags, draft.tags, "tag");
-  $("#exclTags").innerHTML = chips(S.meta.tags, draft.exclTags, "xtag");
-  $("#stTypes").innerHTML = chips(S.meta.document_types, draft.stTypes, "sttype");
-  $("#stTags").innerHTML = chips(S.meta.tags, draft.stTags, "sttag");
-  $("#matchWindow").value = draft.window;
-  $("#paidTagName").textContent = S.meta.paid_tag_name;
-  $("#paidFieldName").textContent = S.meta.paid_field_name;
-  $("#fuelCorr").innerHTML = chips(S.meta.correspondents, draft.fuelCorr, "fcorr");
-  $("#fuelTags").innerHTML = chips(S.meta.tags, draft.fuelTags, "ftag");
-  renderVehicleSettings();
-}
-$("#matchWindow").onchange = (e) => (draft.window = Number(e.target.value) || 60);
-$("#tagSearch").oninput = renderSettings;
-
-$("#catSettings").addEventListener("change", (e) => {
-  const r = e.target.closest(".cs-row"); if (!r) return; const id = Number(r.dataset.id);
-  if (e.target.classList.contains("cs-on")) {
-    draft.cats = e.target.checked ? [...draft.cats, id] : draft.cats.filter((x) => x !== id);
-    renderSettings();
-  } else if (e.target.type === "number") {
-    draft.budgets[id] = e.target.value === "" ? null : Number(e.target.value);
-  }
-});
-$("#catSettings").addEventListener("click", (e) => {
-  const mv = e.target.dataset.mv; if (!mv) return;
-  const id = Number(e.target.closest(".cs-row").dataset.id), i = draft.cats.indexOf(id), j = i + Number(mv);
-  if (j < 0 || j >= draft.cats.length) return;
-  [draft.cats[i], draft.cats[j]] = [draft.cats[j], draft.cats[i]]; renderSettings();
-});
-document.querySelector("#view-settings").addEventListener("change", (e) => {
-  const d = e.target.dataset;
-  const key = d.type ? "types" : d.tag ? "tags" : d.sttype ? "stTypes" : d.sttag ? "stTags" : d.fcorr ? "fuelCorr" : d.ftag ? "fuelTags" : d.xtag ? "exclTags" : null; if (!key) return;
-  const set = draft[key], id = Number(d.type || d.tag || d.sttype || d.sttag || d.fcorr || d.ftag || d.xtag);
-  e.target.checked ? set.add(id) : set.delete(id);
-  e.target.closest(".chip").classList.toggle("on", e.target.checked);
-});
-$("#saveSettings").onclick = async () => {
-  try {
-    S.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify({
-      category_tag_ids: draft.cats, review_document_type_ids: [...draft.types], review_tag_ids: [...draft.tags],
-      statement_document_type_ids: [...draft.stTypes], statement_tag_ids: [...draft.stTags], match_window_days: draft.window,
-      fuel_correspondent_ids: [...draft.fuelCorr], fuel_tag_ids: [...draft.fuelTags], exclude_tag_ids: [...draft.exclTags],
-    }) });
-    const budgets = {};
-    for (const [id, v] of Object.entries(draft.budgets)) budgets[id] = v;
-    for (const id of Object.keys(S.budgets)) if (!(id in budgets)) budgets[id] = null;
-    S.budgets = await api("/api/budgets", { method: "PUT", body: JSON.stringify({ budgets }) });
-    draft = null; renderSettings(); toast("Einstellungen gespeichert");
-  } catch (err) { toast(err.message, true); }
-};
-
 // ------------------------------------------------------------ Start
 (async function init() {
   $("#monthLabel").textContent = monthLabel(S.month);

@@ -16,19 +16,33 @@ from . import main as core
 from . import realestate as rx
 
 router = APIRouter()
+
+with core.db() as _con:
+    _con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS heating_stock (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL,
+            date TEXT NOT NULL, liters REAL NOT NULL DEFAULT 0, price REAL,   -- CHF pro 100 Liter
+            note TEXT
+        );
+        """
+    )
+    for _t, _c, _ty in [("properties", "oil_category_id", "INTEGER"), ("nk_statements", "interim", "INTEGER")]:
+        if _c not in {r["name"] for r in _con.execute(f"PRAGMA table_info({_t})")}:
+            _con.execute(f"ALTER TABLE {_t} ADD COLUMN {_c} {_ty}")
 FILES_DIR = Path(os.environ.get("FILES_DIR", str(Path(core.DB_PATH).parent / "abrechnungen")))
-NK_TAG_NAME = os.environ.get("NK_TAG_NAME", "Nebenkostenabrechnung")
 
 # ---------------------------------------------------------------- generisches CRUD
 ENT: dict[str, tuple[str, list[str]]] = {
     "properties": ("properties", ["name", "address", "owner_name", "owner_address", "owner_iban", "start_month", "room_pct",
-                                  "room_key_id", "water_key_id", "tag_id", "exclude_from_budget", "intro", "closing", "due_days"]),
+                                  "room_key_id", "water_key_id", "tag_id", "exclude_from_budget", "intro", "closing", "due_days", "oil_category_id"]),
     "units": ("units", ["property_id", "name", "area", "owner_occupied", "sort"]),
     "keys": ("dist_keys", ["property_id", "name", "type"]),
     "categories": ("cost_categories", ["property_id", "grp", "name", "key_id", "heating", "unit_label", "sort", "keywords"]),
     "tenancies": ("tenancies", ["unit_id", "tenant_name", "tenant_address", "salutation", "start", "end", "rent", "akonto", "match_text"]),
     "fixed-costs": ("fixed_costs", ["property_id", "category_id", "unit_id", "name", "amount", "interval", "valid_from", "valid_to"]),
     "manual-costs": ("manual_costs", ["property_id", "category_id", "unit_id", "date", "description", "amount", "quantity"]),
+    "heating-stock": ("heating_stock", ["property_id", "date", "liters", "price", "note"]),
     "projects": ("projects", ["name", "budget", "tag_id", "status", "exclude_from_budget", "start", "end", "note"]),
 }
 
@@ -104,7 +118,7 @@ def re_delete(ent: str, rid: int):
                 con.execute("DELETE FROM tenancies WHERE unit_id = ?", (u,))
             for k in keys:
                 con.execute("DELETE FROM key_shares WHERE key_id = ?", (k,))
-            for t in ("units", "dist_keys", "cost_categories", "fixed_costs", "manual_costs"):
+            for t in ("units", "dist_keys", "cost_categories", "fixed_costs", "manual_costs", "heating_stock"):
                 con.execute(f"DELETE FROM {t} WHERE property_id = ?", (rid,))
             con.execute("DELETE FROM allocations WHERE target_type = 'property' AND target_id = ?", (rid,))
         elif ent == "units":
@@ -350,9 +364,9 @@ def _period(p: dict, year: int) -> tuple[date, date]:
     return rx.period_for(int(p["start_month"] or 1), year)
 
 
-async def property_costs(pid: int, year: int) -> tuple[dict, tuple[date, date], list[dict]]:
+async def property_costs(pid: int, year: int, period: Optional[tuple[date, date]] = None) -> tuple[dict, tuple[date, date], list[dict]]:
     p = _load_property(pid)
-    p0, p1 = _period(p, year)
+    p0, p1 = period or _period(p, year)
     await core.get_meta()
     lines = await target_lines("property", pid, p0, p1, p["categories"])
     days_total = (p1 - p0).days + 1
@@ -426,8 +440,50 @@ def _akonto(tenancy: Optional[dict], p0: date, p1: date) -> tuple[float, float]:
     return received, expected
 
 
-async def _statement(pid: int, year: int, tenancy_id: Optional[int], unit_id: Optional[int], akonto: Optional[float]):
-    p, (p0, p1), lines = await property_costs(pid, year)
+def _reading(pid: int, d: date, tol: int = 20) -> Optional[dict]:
+    """Tankstand-Ablesung am nächsten zum Stichtag (höchstens `tol` Tage daneben)."""
+    with core.db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM heating_stock WHERE property_id = ?", (pid,))]
+    best = min(rows, key=lambda r: abs((date.fromisoformat(r["date"]) - d).days), default=None)
+    return best if best and abs((date.fromisoformat(best["date"]) - d).days) <= tol else None
+
+
+def _oil(p: dict, p0: date, p1: date, lines: list[dict]) -> tuple[list[dict], Optional[dict]]:
+    """Heizöl nach Verbrauch statt nach Einkauf: Anfangsbestand + Einkäufe − Endbestand."""
+    cid = p.get("oil_category_id")
+    if not cid:
+        return lines, None
+    start, end = _reading(p["id"], p0), _reading(p["id"], p1 + timedelta(days=1)) or _reading(p["id"], p1)
+    buys = [l for l in lines if l["category_id"] == cid and not l.get("unit_id")]
+    info = {"category_id": cid, "start": start, "end": end, "complete": bool(start and end),
+            "purchases": {"liters": rx.r2(sum(l.get("quantity") or 0 for l in buys)), "amount": rx.r2(sum(l["amount"] for l in buys)),
+                          "count": len(buys)}}
+    if not info["complete"]:
+        return lines, info
+    val = lambda r: rx.r2((r["liters"] or 0) * (r["price"] or 0) / 100)
+    start_v, end_v = val(start), val(end)
+    liters = rx.r2((start["liters"] or 0) + info["purchases"]["liters"] - (end["liters"] or 0))
+    amount = rx.r2(start_v + info["purchases"]["amount"] - end_v)
+    info.update(start_value=start_v, end_value=end_v, liters=liters, amount=amount,
+                price=rx.r2(amount / liters * 100) if liters else None)
+    rest = [l for l in lines if l not in buys]
+    rest.append({"key": "oil", "source": "Verbrauch", "source_type": "oil", "source_id": None, "alloc_id": None, "date": p1.isoformat(),
+                 "title": "Heizöl-Verbrauch", "purpose": None, "full_amount": amount, "amount": amount, "category_id": cid,
+                 "category_guessed": False, "unit_id": None, "quantity": liters, "url": None, "implicit": False})
+    return rest, info
+
+
+async def _statement(pid: int, year: int, tenancy_id: Optional[int], unit_id: Optional[int], akonto: Optional[float],
+                     period_from: Optional[str] = None, period_to: Optional[str] = None):
+    interim = bool(period_from or period_to)
+    period = None
+    if interim:
+        base = _period(_load_property(pid), year)
+        period = (date.fromisoformat(period_from) if period_from else base[0], date.fromisoformat(period_to) if period_to else base[1])
+        if period[1] < period[0]:
+            raise HTTPException(400, "Ende liegt vor dem Beginn")
+    p, (p0, p1), lines = await property_costs(pid, year, period)
+    lines, oil = _oil(p, p0, p1, lines)
     tenancy = next((t for t in p["tenancies"] if t["id"] == tenancy_id), None) if tenancy_id else None
     uid = tenancy["unit_id"] if tenancy else unit_id
     if not uid or not any(u["id"] == uid for u in p["units"]):
@@ -443,15 +499,15 @@ async def _statement(pid: int, year: int, tenancy_id: Optional[int], unit_id: Op
     st = rx.compute_statement(units=units, keys=keys, categories=cats, costs=costs, unit_id=uid, period=(p0, p1),
                               stay=_stay(tenancy, p0, p1), room_pct=p["room_pct"] or 70, room_key_id=p["room_key_id"],
                               water_key_id=p["water_key_id"], akonto=used)
-    st.update({"akonto_received": received, "akonto_expected": expected,
+    st.update({"akonto_received": received, "akonto_expected": expected, "interim": interim, "oil": oil,
                "unassigned": [l for l in lines if not l["category_id"]], "tenancy": tenancy})
     return p, st
 
 
 @router.get("/api/properties/{pid}/statement")
 async def statement_preview(pid: int, year: int, tenancy_id: Optional[int] = None, unit_id: Optional[int] = None,
-                            akonto: Optional[float] = None):
-    _, st = await _statement(pid, year, tenancy_id, unit_id, akonto)
+                            akonto: Optional[float] = None, period_from: Optional[str] = None, period_to: Optional[str] = None):
+    _, st = await _statement(pid, year, tenancy_id, unit_id, akonto, period_from, period_to)
     return st
 
 
@@ -472,7 +528,8 @@ async def _ensure_tag(name: str) -> int:
 @router.post("/api/properties/{pid}/statement/generate")
 async def statement_generate(pid: int, body: dict = Body(...)):
     year = int(body["year"])
-    p, st = await _statement(pid, year, body.get("tenancy_id"), body.get("unit_id"), body.get("akonto"))
+    p, st = await _statement(pid, year, body.get("tenancy_id"), body.get("unit_id"), body.get("akonto"),
+                             body.get("period_from"), body.get("period_to"))
     tenancy = st["tenancy"]
     unit = next(u for u in p["units"] if u["id"] == st["unit"]["id"])
     inv = date.fromisoformat(body["invoice_date"]) if body.get("invoice_date") else date.today()
@@ -480,7 +537,7 @@ async def statement_generate(pid: int, body: dict = Body(...)):
               if tenancy else {"name": p["owner_name"] or "", "address": p["owner_address"] or "", "salutation": "Eigenanteil"})
     FILES_DIR.mkdir(parents=True, exist_ok=True)
     p0, p1 = st["period"]
-    base = _safe(f"Nebenkosten_{p0[:4]}-{p1[2:4]}_{unit['name']}_{tenant['name']}")
+    base = _safe(f"{'Zwischenabrechnung_' + p0 + '_' + p1 if st['interim'] else 'Nebenkosten_' + p0[:4] + '-' + p1[2:4]}_{unit['name']}_{tenant['name']}")
     docx_path = FILES_DIR / f"{base}.docx"
     rx.build_docx(str(docx_path), st, owner={"name": p["owner_name"] or "", "address": p["owner_address"] or "", "iban": p["owner_iban"]},
                   tenant=tenant, prop={"name": p["name"], "address": p["address"] or p["name"]}, invoice_date=inv,
@@ -497,8 +554,9 @@ async def statement_generate(pid: int, body: dict = Body(...)):
     task = None
     if body.get("upload", True) and pdf_path:
         try:
-            tags = [await _ensure_tag(NK_TAG_NAME)] + ([p["tag_id"]] if p.get("tag_id") else [])
-            title = f"Nebenkostenabrechnung {p0[:4]}/{p1[:4]} {unit['name']} – {tenant['name']}"
+            tags = [await _ensure_tag(core.get_settings()["nk_tag_name"])] + ([p["tag_id"]] if p.get("tag_id") else [])
+            title = (f"Zwischenabrechnung Nebenkosten {p0} – {p1} {unit['name']} – {tenant['name']}" if st["interim"]
+                     else f"Nebenkostenabrechnung {p0[:4]}/{p1[:4]} {unit['name']} – {tenant['name']}")
             data = {"title": title, "created": inv.isoformat(), "tags": [str(t) for t in tags]}
             r = await core.client().post("/api/documents/post_document/", data=data,
                                          files={"document": (pdf_path.name, pdf_path.read_bytes(), "application/pdf")})
@@ -510,9 +568,10 @@ async def statement_generate(pid: int, body: dict = Body(...)):
             warnings.append(f"Upload zu Paperless fehlgeschlagen ({e}).")
     with core.db() as con:
         con.execute("INSERT INTO nk_statements(property_id, unit_id, tenancy_id, period_start, period_end, total, akonto, saldo, "
-                    "created_at, docx, pdf, paperless_task) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "created_at, docx, pdf, paperless_task, interim) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (pid, unit["id"], tenancy["id"] if tenancy else None, p0, p1, st["total"], st["akonto"], st["saldo"],
-                     datetime.now().isoformat(timespec="seconds"), docx_path.name, pdf_path.name if pdf_path else None, task))
+                     datetime.now().isoformat(timespec="seconds"), docx_path.name, pdf_path.name if pdf_path else None, task,
+                     1 if st["interim"] else 0))
     return {"docx": f"/api/files/{docx_path.name}", "pdf": f"/api/files/{pdf_path.name}" if pdf_path else None,
             "paperless_task": task, "warnings": warnings, "total": st["total"], "saldo": st["saldo"]}
 

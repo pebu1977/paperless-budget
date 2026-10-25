@@ -122,6 +122,19 @@ def compute_statement(*, units: list[Unit], keys: list[Key], categories: list[Ca
         k = key_by.get(key_id)
         return k.share(unit_id, units) if k else 0.0
 
+    def key_info(key_id: Optional[int]) -> Optional[dict]:
+        """Kennzahlen eines Schlüssels für die Abrechnung: Total Anteile, Anteil der Wohnung, Einheit."""
+        k = key_by.get(key_id)
+        if not k:
+            return None
+        if k.type == "area":
+            total, mine, lbl = sum(u.area for u in units), unit.area, "m²"
+        elif k.type == "equal":
+            total, mine, lbl = float(len(units)), 1.0, "Whg."
+        else:
+            total, mine, lbl = sum(float(v or 0) for v in k.shares.values()), float(k.shares.get(unit_id, 0) or 0), "%"
+        return {"id": k.id, "name": k.name, "type": k.type, "total": round(total, 3), "mine": round(mine, 3), "unit": lbl}
+
     # --- Heizpool
     heat_items = [c for c in costs if cat_by.get(c.category_id) and cat_by[c.category_id].heating and c.unit_id is None]
     heat_by_cat: dict[int, dict] = {}
@@ -165,6 +178,7 @@ def compute_statement(*, units: list[Unit], keys: list[Key], categories: list[Ca
             "total": 0.0, "quantity": None, "unit_label": cat.unit_label,
             "key": "direkt" if direct else (key_by[cat.key_id].name if cat.key_id in key_by else "–"),
             "share": 1.0 if direct else share_of(cat.key_id), "sort": cat.sort, "direct": direct,
+            "key_info": None if direct else key_info(cat.key_id),
         })
         row["total"] += c.amount
         if c.quantity:
@@ -195,6 +209,7 @@ def compute_statement(*, units: list[Unit], keys: list[Key], categories: list[Ca
             "room_total": room_total, "water_total": water_total,
             "room_share_pct": round(room_share * 100, 2), "water_share_pct": round(water_share * 100, 2),
             "room_unit": room_unit, "water_unit": water_unit, "energy_unit": energy_unit,
+            "room_key": key_info(room_key_id), "water_key": key_info(water_key_id),
         },
         "groups": group_list,
         "subtotal": raw, "rounding": r2(total - raw), "total": total,
@@ -204,47 +219,76 @@ def compute_statement(*, units: list[Unit], keys: list[Key], categories: list[Ca
 
 
 # ---------------------------------------------------------------- Word-Dokument
+GROUP_COLORS = [("warmwasser", "C8916B"), ("raumheizung", "B5652B"), ("heiz", "A0522D"), ("wasser", "6E5A9E"),
+                ("unterhalt", "77933C"), ("entsorg", "77933C"), ("hauswart", "77933C"), ("garten", "77933C"),
+                ("strom", "3F8FA8"), ("allgemein", "3F8FA8"), ("versicher", "4F6FA8"), ("lift", "8C6D3F")]
+FALLBACK_COLORS = ["4F6FA8", "8064A2", "3F8FA8", "C0782E", "6E8B3D"]
+
+
+def group_color(name: str, i: int = 0) -> str:
+    n = name.lower()
+    return next((c for k, c in GROUP_COLORS if k in n), FALLBACK_COLORS[i % len(FALLBACK_COLORS)])
+
+
+def _n3(x: float) -> str:
+    return f"{x:,.3f}".replace(",", "'")
+
+
 def build_docx(path: str, st: dict, *, owner: dict, tenant: dict, prop: dict, invoice_date: date, due_days: int = 30,
                intro: Optional[str] = None, closing: Optional[str] = None) -> str:
-    """Abrechnung als .docx im Aufbau der bisherigen Vorlage schreiben."""
+    """Abrechnung als .docx im Aufbau der Vorlage: Brief (Seite 1), Kostenübersicht (Seite 2), Details (ab Seite 3)."""
     from docx import Document
+    from docx.enum.section import WD_ORIENT  # noqa: F401
     from docx.enum.table import WD_TABLE_ALIGNMENT
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.shared import Cm, Pt, RGBColor
 
     p0, p1 = (date.fromisoformat(x) for x in st["period"])
+    s0, s1 = (date.fromisoformat(x) for x in st["stay"])
+    interim = st.get("interim")
     due = invoice_date + timedelta(days=due_days)
-    fmt_d = lambda d: d.strftime("%d.%m.%Y")
-    plabel = f"{p0.year}/{p1.year}" if p0.year != p1.year else str(p0.year)
-    short = f"{str(p0.year)[2:]}/{str(p1.year)[2:]}" if p0.year != p1.year else str(p0.year)
+    fd = lambda d: d.strftime("%d.%m.%Y")
+    if interim:
+        short = f"{p0:%d.%m.}–{p1:%d.%m.%y}"
+        plabel = f"{fd(p0)} – {fd(p1)}"
+    else:
+        short = f"{str(p0.year)[2:]}/{str(p1.year)[2:]}" if p0.year != p1.year else str(p0.year)
+        plabel = f"{p0.year}/{p1.year}" if p0.year != p1.year else str(p0.year)
+    h = st["heating"]
+    RIGHT, LEFT = WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.LEFT
+    FULL = 17.5
 
     doc = Document()
     sec = doc.sections[0]
-    sec.left_margin = sec.right_margin = Cm(2.2)
-    sec.top_margin, sec.bottom_margin = Cm(1.8), Cm(1.8)
+    sec.page_width, sec.page_height = Cm(21), Cm(29.7)
+    sec.left_margin, sec.right_margin = Cm(2.0), Cm(1.5)
+    sec.top_margin, sec.bottom_margin = Cm(1.6), Cm(1.6)
+    sec.header_distance = sec.footer_distance = Cm(0.9)
     base = doc.styles["Normal"]
     base.font.name = "Arial"
-    base.font.size = Pt(10)
+    base.font.size = Pt(9)
     base.element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
-    base.paragraph_format.space_after = Pt(2)
+    base.paragraph_format.space_after = Pt(0)
+    base.paragraph_format.space_before = Pt(0)
 
-    def para(text="", bold=False, size=None, italic=False, align=None, space_after=None, color=None):
-        p = doc.add_paragraph()
-        r = p.add_run(text)
-        r.bold, r.italic = bold, italic
-        if size:
-            r.font.size = Pt(size)
-        if color:
-            r.font.color.rgb = RGBColor.from_string(color)
-        if align:
-            p.alignment = align
-        if space_after is not None:
-            p.paragraph_format.space_after = Pt(space_after)
-        if bold and size and size >= 11:
-            p.paragraph_format.keep_with_next = True
-        return p
+    # ---- Helfer
+    def border(el_pr, sides: dict):
+        b = el_pr.find(qn("w:pBdr")) if el_pr.tag == qn("w:pPr") else el_pr.find(qn("w:tcBorders"))
+        if b is None:
+            b = OxmlElement("w:pBdr" if el_pr.tag == qn("w:pPr") else "w:tcBorders")
+            el_pr.append(b)
+        for side, (val, sz) in sides.items():
+            e = OxmlElement(f"w:{side}")
+            e.set(qn("w:val"), val)
+            e.set(qn("w:sz"), str(sz))
+            e.set(qn("w:space"), "0")
+            e.set(qn("w:color"), "000000")
+            b.append(e)
+
+    def cell_border(cell, **sides):
+        border(cell._tc.get_or_add_tcPr(), {k: v for k, v in sides.items()})
 
     def shade(cell, hex_):
         tcPr = cell._tc.get_or_add_tcPr()
@@ -254,122 +298,404 @@ def build_docx(path: str, st: dict, *, owner: dict, tenant: dict, prop: dict, in
         sh.set(qn("w:fill"), hex_)
         tcPr.append(sh)
 
-    def table(rows, widths, header=False, bold_last=False, right_from=1, shade_header="E8EDE9"):
-        t = doc.add_table(rows=0, cols=len(widths))
-        t.alignment = WD_TABLE_ALIGNMENT.LEFT
+    def margins(cell, top=30, bottom=30, left=60, right=60):
+        tcPr = cell._tc.get_or_add_tcPr()
+        m = OxmlElement("w:tcMar")
+        for side, v in (("top", top), ("bottom", bottom), ("left", left), ("right", right)):
+            e = OxmlElement(f"w:{side}")
+            e.set(qn("w:w"), str(v))
+            e.set(qn("w:type"), "dxa")
+            m.append(e)
+        tcPr.append(m)
+
+    def write(p, text, bold=False, italic=False, size=None, color=None, underline=False):
+        r = p.add_run("" if text is None else str(text))
+        r.bold, r.italic, r.underline = bold, italic, underline
+        if size:
+            r.font.size = Pt(size)
+        if color:
+            r.font.color.rgb = RGBColor.from_string(color)
+        return r
+
+    def para(text="", bold=False, italic=False, size=None, align=None, after=0, before=0, color=None, container=None):
+        p = (container or doc).add_paragraph()
+        write(p, text, bold, italic, size, color)
+        p.paragraph_format.space_after, p.paragraph_format.space_before = Pt(after), Pt(before)
+        if align is not None:
+            p.alignment = align
+        return p
+
+    def ctext(cell, text, bold=False, italic=False, size=None, align=None, color=None, underline=False, first=True):
+        p = cell.paragraphs[0] if first and not cell.paragraphs[0].text else cell.add_paragraph()
+        write(p, text, bold, italic, size, color, underline)
+        if align is not None:
+            p.alignment = align
+        return p
+
+    def table(cols, container=None, align=WD_TABLE_ALIGNMENT.LEFT):
+        t = (container or doc).add_table(rows=0, cols=len(cols))
+        t.alignment = align
         t.autofit = False
-        for j, w in enumerate(widths):
+        for j, w in enumerate(cols):
             t.columns[j].width = Cm(w)
-        for i, row in enumerate(rows):
-            cells = t.add_row().cells
-            for j, val in enumerate(row):
-                c = cells[j]
-                c.width = Cm(widths[j])
-                p = c.paragraphs[0]
-                p.paragraph_format.space_after = Pt(1)
-                run = p.add_run("" if val is None else str(val))
-                if (header and i == 0) or (bold_last and i == len(rows) - 1):
-                    run.bold = True
-                if j >= right_from:
-                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                if i < len(rows) - 1:
-                    p.paragraph_format.keep_with_next = True
-                if header and i == 0:
-                    shade(c, shade_header)
-        doc.add_paragraph().paragraph_format.space_after = Pt(4)
         return t
 
-    # Absender / Empfänger
-    for line in [owner.get("name", "")] + (owner.get("address") or "").splitlines():
-        para(line, bold=True, size=9, color="555555", space_after=0)
-    para(space_after=10)
-    for line in [tenant.get("name", "")] + (tenant.get("address") or "").splitlines():
-        para(line, bold=True, space_after=0)
-    para(space_after=10)
+    def row(t, values, widths, bold=False, size=None, aligns=None, color=None, underline=False):
+        cells = t.add_row().cells
+        for j, v in enumerate(values):
+            cells[j].width = Cm(widths[j])
+            margins(cells[j])
+            if v is not None and v != "":
+                ctext(cells[j], v, bold=bold, size=size, color=color, underline=underline,
+                      align=(aligns[j] if aligns else (RIGHT if j > 0 else LEFT)))
+        return cells
 
-    info = doc.add_table(rows=0, cols=2)
-    for k, v in [("Abrechnungsperiode:", f"{fmt_d(p0)} – {fmt_d(p1)}"), ("Rechnungsdatum:", fmt_d(invoice_date)),
-                 ("Zahlbar bis:", fmt_d(due)), ("Liegenschaft:", prop.get("address") or prop.get("name", ""))]:
-        c = info.add_row().cells
-        c[0].width, c[1].width = Cm(4.5), Cm(11)
-        c[0].paragraphs[0].add_run(k).italic = True
-        c[1].paragraphs[0].add_run(v.replace("\n", ", ")).bold = k == "Zahlbar bis:"
-    para(space_after=6)
+    def bar(text, color, width=FULL, container=None, text_color="FFFFFF"):
+        t = table([width], container)
+        c = t.add_row().cells[0]
+        c.width = Cm(width)
+        shade(c, color)
+        margins(c, 20, 20, 80, 80)
+        ctext(c, text, size=10, color=text_color)
+        return t
 
-    para(f"Heiz- und Nebenkostenabrechnung {plabel} für '{st['unit']['name']}'", bold=True, size=12, space_after=8)
-    para(tenant.get("salutation") or "Guten Tag", space_after=6)
-    para(intro or "Mit diesem Brief erhalten Sie die Nebenkostenabrechnung mit detaillierter Energiekostenübersicht.", space_after=8)
+    def gap(pt=6, container=None):
+        para("", after=0, before=0, container=container).paragraph_format.line_spacing = Pt(pt)
+
+    def page_break():
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+
+    def field(p, instr):
+        for kind, text in (("begin", None), ("instr", instr), ("separate", None), ("text", "1"), ("end", None)):
+            r = p.add_run()
+            r.bold = True
+            if kind == "instr":
+                el = OxmlElement("w:instrText")
+                el.set(qn("xml:space"), "preserve")
+                el.text = f" {text} "
+            elif kind == "text":
+                el = OxmlElement("w:t")
+                el.text = text
+            else:
+                el = OxmlElement("w:fldChar")
+                el.set(qn("w:fldCharType"), kind)
+            r._r.append(el)
+
+    # ---- Kopf-/Fusszeile ab Seite 2 (Linie oben, "Seite x/y" unten rechts)
+    sec.different_first_page_header_footer = True
+    hp = sec.header.paragraphs[0]
+    border(hp._p.get_or_add_pPr(), {"bottom": ("single", 6)})
+    fp = sec.footer.paragraphs[0]
+    border(fp._p.get_or_add_pPr(), {"top": ("single", 6)})
+    fp.alignment = RIGHT
+    write(fp, "Seite ", bold=True, size=8)
+    field(fp, "PAGE")
+    write(fp, "/", bold=True, size=8)
+    field(fp, "NUMPAGES")
+    for r in fp.runs:
+        r.font.size = Pt(8)
+
+    # ================================================================ Seite 1: Brief
+    head = table([9.5, 8.0])
+    c = head.add_row().cells
+    c[0].width, c[1].width = Cm(9.5), Cm(8.0)
+    for i, line in enumerate([owner.get("name", "")] + (owner.get("address") or "").splitlines()):
+        ctext(c[1], line, bold=True, size=8.5, first=(i == 0))
+    c = head.add_row().cells
+    c[0].width, c[1].width = Cm(9.5), Cm(8.0)
+    gp = c[0].paragraphs[0]
+    gp.paragraph_format.space_before = Pt(40)
+    for i, line in enumerate([tenant.get("name", "")] + (tenant.get("address") or "").replace(", ", "\n").splitlines()):
+        pp = ctext(c[0], line, bold=True, size=8.5, first=(i == 0))
+        if i == 0:
+            pp.paragraph_format.space_before = Pt(40)
+            pp.paragraph_format.left_indent = Cm(0.6)
+        else:
+            pp.paragraph_format.left_indent = Cm(0.6)
+    info = c[1]
+    pp = ctext(info, "Abrechnungsperiode:", bold=True, italic=True, size=8.5)
+    pp.paragraph_format.space_before = Pt(14)
+    ctext(info, f"{fd(p0)} – {fd(p1)}", size=8.5, first=False)
+    if interim and (s0 != p0 or s1 != p1):
+        ctext(info, f"Ihre Nutzung: {fd(s0)} – {fd(s1)}", size=8.5, first=False)
+    ctext(info, "", first=False)
+    pp = ctext(info, "Rechnungsdatum: ", bold=True, italic=True, size=8.5, first=False)
+    write(pp, fd(invoice_date), size=8.5)
+    pp = ctext(info, "Zahlbar bis: ", bold=True, italic=True, size=8.5, first=False)
+    write(pp, fd(due), bold=True, size=8.5)
+    ctext(info, "", first=False)
+    ctext(info, "Liegenschaft:", bold=True, italic=True, size=8.5, first=False)
+    for line in (prop.get("address") or prop.get("name", "")).replace(", ", "\n").splitlines():
+        ctext(info, line, size=8.5, first=False)
+
+    title = (f"Zwischenabrechnung Heiz- und Nebenkosten {plabel} für '{st['unit']['name']}'" if interim
+             else f"Heiz- und Nebenkostenabrechnung {plabel} für '{st['unit']['name']}'")
+    para(title, bold=True, size=10.5, before=48, after=14)
+    para(tenant.get("salutation") or "Guten Tag", bold=True, size=10, after=14)
+    if not intro:
+        intro = ("Mit diesem Brief erhalten Sie die Zwischenabrechnung der Heiz- und Nebenkosten mit detaillierter Energiekostenübersicht."
+                 if interim else "Mit diesem Brief erhalten Sie die Nebenkostenabrechnung mit detaillierter Energiekostenübersicht.")
+    para(intro, bold=True, size=9.5, after=16)
 
     saldo = st["saldo"]
-    table([
-        ["CHF", "Ihre Kosten", "Liegenschaft"],
-        ["", short, short],
-        ["Total Kosten", chf(st["total"]), chf(st["property_total"])],
-        ["Total Akonto", chf(st["akonto"]), ""],
-        ["Saldo zu unseren Gunsten" if saldo >= 0 else "Guthaben zu Ihren Gunsten", chf(abs(saldo)), ""],
-    ], [7, 4.5, 4.5], header=True, bold_last=True)
+    W = [6.0, 5.0, 5.0]
+    t = table(W)
+    row(t, ["CHF", "Ihre Kosten", "Liegenschaft"], W, size=9)
+    row(t, ["", short, short], W, size=9)
+    gap_cells = row(t, ["", "", ""], W)
+    gap_cells[0].paragraphs[0].paragraph_format.line_spacing = Pt(6)
+    row(t, ["Total", chf(st["total"]), chf(st["property_total"])], W, size=9)
+    row(t, ["Akonto", chf(st["akonto"]), ""], W, size=9)
+    cells = row(t, ["Saldo zu unseren Gunsten" if saldo >= 0 else "Guthaben zu Ihren Gunsten", chf(abs(saldo)), ""], W, size=9)
+    cell_border(cells[1], top=("single", 6), bottom=("double", 6))
     if saldo > 0:
-        para(f"Bitte überweisen Sie uns den Saldo von CHF {chf(saldo)} bis zum {fmt_d(due)} auf das Mietzinskonto"
-             + (f" ({owner['iban']})." if owner.get("iban") else "."), space_after=8)
+        txt = f"Bitte überweisen Sie uns den Saldo bis zum {fd(due)} auf das Mietzinskonto" + (f" {owner['iban']}." if owner.get("iban") else ".")
     elif saldo < 0:
-        para(f"Das Guthaben von CHF {chf(-saldo)} überweisen wir Ihnen in den nächsten Tagen bzw. verrechnen es mit der nächsten Miete.",
-             space_after=8)
+        txt = "Das Guthaben überweisen wir Ihnen in den nächsten Tagen bzw. verrechnen es mit der nächsten Miete."
+    else:
+        txt = ""
+    if txt:
+        para(txt, bold=True, size=9.5, before=22)
+    page_break()
 
-    # Kostenübersicht
-    para("Kostenübersicht", bold=True, size=11, space_after=4)
-    h = st["heating"]
-    rows = [["", short]]
-    if h["total"]:
-        rows += [["ENERGIE", ""], ["   Raumheizung", chf(h["room_unit"])], ["   Warmwasser", chf(h["water_unit"])],
-                 ["Total Energiekosten", chf(h["energy_unit"])]]
-    for g in st["groups"]:
-        rows.append([g["name"], chf(g["unit_total"])])
-    if st["rounding"]:
-        rows.append(["Rundungsdifferenz", chf(st["rounding"])])
-    rows.append(["TOTAL CHF", chf(st["total"])])
-    table(rows, [11.5, 4.5], header=True, bold_last=True)
+    # ================================================================ Seite 2: Kostenübersicht
+    bar("Kostenübersicht", "000000")
+    gap(10)
+    W = [7.5, 3.0, 4.5]
+    ov = table(W)
 
-    # Bezugsgrössen
-    para("Bezugsgrössen", bold=True, size=11, space_after=4)
-    rows = [["", "", "Ihr Objekt", "Liegenschaft"],
-            ["Wohnfläche", "m²", f"{st['unit']['area']:.2f}", f"{st['area_total']:.2f}"],
-            ["Nutzungsdauer", "Tage", str(st["days"]), str(st["days_total"])]]
-    if h["total"]:
-        rows += [["Anteil Raumheizung", "%", f"{h['room_share_pct']:.2f}", "100.00"],
-                 ["Anteil Warmwasser", "%", f"{h['water_share_pct']:.2f}", "100.00"]]
-    table(rows, [6, 2, 4, 4], header=True, right_from=2)
+    def box(cells, top=False, bottom=False):
+        sides = {"left": ("single", 6), "right": ("single", 6)}
+        if top:
+            sides["top"] = ("single", 6)
+        if bottom:
+            sides["bottom"] = ("single", 6)
+        cell_border(cells[2], **sides)
 
-    # Heizkosten-Detail
+    cells = row(ov, ["", "", ""], W)
+    ctext(cells[2], "Ihr Objekt", size=9, align=RIGHT)
+    ctext(cells[2], short, size=9, align=LEFT, first=False)
+    box(cells, top=True)
+
+    def ov_bar(text, color):
+        cells = ov.add_row().cells
+        m = cells[0].merge(cells[1]).merge(cells[2])
+        shade(m, color)
+        margins(m, 15, 15, 60, 60)
+        ctext(m, text, size=9.5, color="FFFFFF")
+
+    def ov_cost(value):
+        cells = row(ov, ["", "Kosten   CHF", chf(value)], W, size=9, aligns=[LEFT, RIGHT, LEFT])
+        cells[2].paragraphs[0].paragraph_format.left_indent = Cm(0.6)
+        box(cells)
+        cells = row(ov, ["", "", ""], W)
+        box(cells)
+
     if h["total"]:
-        para("Heizkosten", bold=True, size=11, space_after=4)
-        rows = [["Bezeichnung", "Menge", "Betrag CHF"]]
-        for grp in h["groups"]:
-            rows.append([grp, "", ""])
+        cells = row(ov, ["ENERGIE", "", ""], W, size=9)
+        box(cells)
+        ov_bar("Warmwasser", group_color("Warmwasser"))
+        ov_cost(h["water_unit"])
+        ov_bar("Raumheizung", group_color("Raumheizung"))
+        ov_cost(h["room_unit"])
+        cells = row(ov, ["Total: Energiekosten", "", ""], W, size=9)
+        cell_border(cells[0], top=("single", 6))
+        cell_border(cells[1], top=("single", 6))
+        box(cells)
+        cells = row(ov, ["", "CHF", chf(h["energy_unit"])], W, size=9, aligns=[LEFT, RIGHT, LEFT])
+        cells[2].paragraphs[0].paragraph_format.left_indent = Cm(0.6)
+        for c in cells:
+            shade(c, "D0D0D0")
+        box(cells)
+        cells = row(ov, ["", "", ""], W)
+        box(cells)
+    for i, g in enumerate(st["groups"]):
+        ov_bar(g["name"], group_color(g["name"], i))
+        ov_cost(g["unit_total"])
+    cells = row(ov, ["Rundungsdifferenz", "CHF", chf(st["rounding"])], W, size=9, aligns=[LEFT, RIGHT, LEFT])
+    cells[2].paragraphs[0].paragraph_format.left_indent = Cm(0.6)
+    for c in cells[:2]:
+        cell_border(c, top=("single", 6))
+    box(cells)
+    cells = row(ov, ["TOTAL", "CHF", chf(st["total"])], W, size=9.5, color="FFFFFF", aligns=[LEFT, RIGHT, LEFT])
+    cells[2].paragraphs[0].paragraph_format.left_indent = Cm(0.6)
+    for c in cells:
+        shade(c, "000000")
+    cells = row(ov, ["", "", ""], W)
+    box(cells, bottom=True)
+
+    gap(14)
+    W = [4.0, 1.5, 2.0, 2.0]
+    t = table(W)
+    row(t, ["Bezugsgrössen der Kennzahlen", "", "", ""], W, size=7)
+    row(t, ["Wohnfläche", "m²", f"{st['unit']['area']:.2f}", f"{st['area_total']:.2f}"], W, size=7,
+        aligns=[LEFT, LEFT, RIGHT, RIGHT])
+    row(t, ["Nutzungsdauer", "Tage", str(st["days"]), str(st["days_total"])], W, size=7, aligns=[LEFT, LEFT, RIGHT, RIGHT])
+    for r_ in t.rows[1:]:
+        for run in r_.cells[3].paragraphs[0].runs:
+            run.font.color.rgb = RGBColor.from_string("A0A0A0")
+    page_break()
+
+    # ================================================================ Detailseiten
+    LW, RW = 10.3, 7.2
+
+    def outer(two=True):
+        t = table([LW, RW] if two else [FULL])
+        return t
+
+    def framed(cells_list):
+        for c in cells_list:
+            cell_border(c, top=("single", 6), bottom=("single", 6), left=("single", 6), right=("single", 6))
+
+    def alloc_rows(left, right, items, saldo_label, saldo_value):
+        """Zuweisungsblock: links Bezeichnung/Betrag/Anteile/CHF pro Einheit, rechts (grau) Ihr Anteil/Tage/%/Gesamt."""
+        ctext(left, "Zuweisung", size=8)
+        Wl = [3.0, 2.4, 2.6, 1.8]
+        tl = table(Wl, left)
+        row(tl, ["", "Betrag Total", "Total", "CHF/"], Wl, size=7.5)
+        row(tl, ["Bezeichnung", "(CHF)", "Anteile", "Einh."], Wl, size=7.5, underline=False)
+        tl.rows[-1].cells[0].paragraphs[0].runs[0].underline = True
+        shade(right, "F2F2F2")
+        ctext(right, f"Ihre Abrechnung von {fd(s0)} bis {fd(s1)}", size=7.5)
+        Wr = [1.7, 1.2, 1.3, 2.4]
+        tr = table(Wr, right)
+        row(tr, ["", "", "", "Gesamt"], Wr, size=7.5)
+        row(tr, ["Ihr Anteil", "Tage", "%", "(CHF)"], Wr, size=7.5)
+        pct_time = st["days"] / st["days_total"] * 100 if st["days_total"] else 0
+        for i, (name, total, ki, amount) in enumerate(items):
+            per = total / ki["total"] if ki and ki["total"] else 0
+            row(tl, [name, chf(total), f"{_n3(ki['total'])} {ki['unit']}" if ki else "–", f"{per:,.3f}".replace(",", "'")], Wl, size=7.5)
+            cells = row(tr, [_n3(ki["mine"]) if ki else "–", str(st["days"]), f"{pct_time:.1f}", chf(amount)], Wr, size=7.5)
+            if i == len(items) - 1:
+                cells[3].paragraphs[0].runs[0].underline = True
+        tt = table([4.6, 2.0], right)
+        row(tt, [saldo_label, chf(saldo_value)], [4.6, 2.0], size=8)
+
+    # ---- Heizkosten
+    if h["total"]:
+        bar("Heizkosten", group_color("Heizkosten"))
+        t = outer()
+        c = t.add_row().cells
+        c[0].width, c[1].width = Cm(LW), Cm(RW)
+        framed(c)
+        Wl = [4.4, 2.0, 1.3, 2.2]
+        letters = "ABCDEFGH"
+        grps = list(h["groups"].items())
+        for gi, (grp, gsum) in enumerate(grps):
+            ctext(c[0], f"{letters[gi]}) {grp}", size=8, first=(gi == 0))
+            tl = table(Wl, c[0])
+            hdr = row(tl, ["Bezeichnung", "Menge", "Einh.", "Betrag CHF"], Wl, size=7.5, aligns=[LEFT, RIGHT, LEFT, RIGHT])
+            for hc in hdr:
+                for run in hc.paragraphs[0].runs:
+                    run.underline = True
             for x in h["rows"]:
                 if x["grp"] == grp:
-                    q = f"{x['quantity']:,.2f} {x['unit_label']}".replace(",", "'") if x["quantity"] else ""
-                    rows.append(["   " + x["name"], q, chf(x["amount"])])
-            rows.append(["   Total " + grp, "", chf(h["groups"][grp])])
-        rows.append(["Total Heizkosten", "", chf(h["total"])])
-        table(rows, [9, 3.5, 3.5], header=True, bold_last=True)
-        rows = [["Zuweisung", "%", "Liegenschaft CHF", "Ihr Anteil %", "Tage", "Ihre Kosten CHF"],
-                ["Raumheizung", f"{h['room_pct']:.2f}", chf(h["room_total"]), f"{h['room_share_pct']:.2f}", str(st["days"]), chf(h["room_unit"])],
-                ["Warmwasser", f"{100 - h['room_pct']:.2f}", chf(h["water_total"]), f"{h['water_share_pct']:.2f}", str(st["days"]), chf(h["water_unit"])],
-                ["Total Energiekosten", "", chf(h["total"]), "", "", chf(h["energy_unit"])]]
-        table(rows, [4.2, 1.5, 3, 2.3, 1.4, 3.6], header=True, bold_last=True)
+                    row(tl, [x["name"], _n3(x["quantity"]) if x["quantity"] else "", x["unit_label"] if x["quantity"] else "",
+                             chf(x["amount"])], Wl, size=7.5, aligns=[LEFT, RIGHT, LEFT, RIGHT])
+            row(tl, ["", "", "", ""], Wl, size=4)
+            row(tl, ["Total" if gi == 0 else f"Total {grp}", "", "", chf(gsum)], Wl, size=7.5)
+            ctext(c[0], "", size=4, first=False)
+        ctext(c[1], "Gesamtkosten (" + "+".join(letters[:len(grps)]) + ")", size=8, underline=True)
+        Wr = [4.0, 1.2, 1.8]
+        tr = table(Wr, c[1])
+        for grp, gsum in grps:
+            row(tr, [grp, "", chf(gsum)], Wr, size=7.5)
+        row(tr, ["", "", ""], Wr, size=4)
+        row(tr, ["Total: Heizkosten", "", chf(h["total"])], Wr, size=7.5)
+        ctext(c[1], "", size=6, first=False)
+        ctext(c[1], "Zuweisung", size=8, first=False)
+        tz = table(Wr, c[1])
+        row(tz, ["Raumheizung", f"{h['room_pct']:.2f}%", chf(h["room_total"])], Wr, size=7.5)
+        row(tz, ["Warmwasser", f"{100 - h['room_pct']:.2f}%", chf(h["water_total"])], Wr, size=7.5)
+        c = t.add_row().cells
+        c[0].width, c[1].width = Cm(LW), Cm(RW)
+        framed(c)
+        alloc_rows(c[0], c[1], [("Raumheizung", h["room_total"], h.get("room_key"), h["room_unit"]),
+                                ("Warmwasser", h["water_total"], h.get("water_key"), h["water_unit"])],
+                   "Saldo Heizkosten", h["energy_unit"])
+        oil = st.get("oil")
+        if oil and oil.get("complete"):
+            gap(6)
+            Wo = [5.5, 2.6, 2.6, 2.6, 2.6]
+            to = table(Wo)
+            row(to, ["Verbrauch Heizöl", "Datum", "Menge", "Preis", "Betrag"], Wo, size=7.5)
+            row(to, ["", "", "in Liter", "CHF / 100 l", "in CHF"], Wo, size=7)
+            st_, en_ = oil["start"], oil["end"]
+            row(to, ["Anfangsbestand", fd(date.fromisoformat(st_["date"])), _n3(st_["liters"]), f"{st_['price']:.2f}", chf(oil["start_value"])],
+                Wo, size=7.5)
+            if oil["purchases"]["count"]:
+                row(to, ["Einkäufe", "", _n3(oil["purchases"]["liters"]), "", chf(oil["purchases"]["amount"])], Wo, size=7.5)
+            row(to, ["Endbestand", fd(date.fromisoformat(en_["date"])), _n3(-en_["liters"]), f"{en_['price']:.2f}", chf(-oil["end_value"])],
+                Wo, size=7.5)
+            cells = row(to, ["Verbrauch", "", _n3(oil["liters"]), f"{oil['price']:.2f}" if oil.get("price") else "", chf(oil["amount"])],
+                        Wo, size=8)
+            cell_border(cells[4], bottom=("double", 6))
+        gap(8)
 
-    # Übrige Gruppen
-    for g in st["groups"]:
-        para(g["name"], bold=True, size=11, space_after=4)
-        rows = [["Bezeichnung", "Total CHF", "Schlüssel", "Ihr Anteil %", "Tage", "Ihre Kosten CHF"]]
-        for r in g["rows"]:
-            rows.append([r["name"], chf(r["total"]), r["key"], f"{r['share_pct']:.2f}", "–" if r.get("direct") else str(st["days"]),
-                         chf(r["unit_amount"])])
-        rows.append(["Total " + g["name"], "", "", "", "", chf(g["unit_total"])])
-        table(rows, [5.0, 2.4, 2.2, 2.2, 1.4, 2.8], header=True, bold_last=True)
+    # ---- übrige Gruppen
+    for gi, g in enumerate(st["groups"]):
+        color = group_color(g["name"], gi)
+        keys = {r["key_info"]["id"] if r.get("key_info") else None for r in g["rows"]}
+        boxed = len(keys) == 1 and None not in keys
+        bar(g["name"], color)
+        if boxed:
+            ki = g["rows"][0]["key_info"]
+            t = outer()
+            c = t.add_row().cells
+            m = c[0].merge(c[1])
+            framed([m])
+            Wl = [4.4, 2.0, 1.3, 2.2]
+            tl = table(Wl, m)
+            hdr = row(tl, ["Bezeichnung", "Menge", "Einh.", "Betrag CHF"], Wl, size=7.5, aligns=[LEFT, RIGHT, LEFT, RIGHT])
+            for hc in hdr:
+                for run in hc.paragraphs[0].runs:
+                    run.underline = True
+            for r_ in g["rows"]:
+                row(tl, [r_["name"], _n3(r_["quantity"]) if r_.get("quantity") else "", r_["unit_label"] if r_.get("quantity") else "",
+                         chf(r_["total"])], Wl, size=7.5, aligns=[LEFT, RIGHT, LEFT, RIGHT])
+            row(tl, ["", "", "", ""], Wl, size=4)
+            row(tl, ["Total", "", "", chf(g["total"])], Wl, size=7.5)
+            c = t.add_row().cells
+            c[0].width, c[1].width = Cm(LW), Cm(RW)
+            framed(c)
+            alloc_rows(c[0], c[1], [(g["name"], g["total"], ki, g["unit_total"])], f"Saldo {g['name']}", g["unit_total"])
+        else:
+            t = outer(two=False)
+            c = t.add_row().cells[0]
+            c.width = Cm(FULL)
+            framed([c])
+            Wl = [6.4, 2.6, 2.2, 1.6, 2.8]
+            tl = table(Wl, c)
+            hdr = row(tl, ["Bezeichnung", "Total (CHF)", "Ihr Anteil", "Tage", "Betrag (CHF)"], Wl, size=7.5)
+            for hc in hdr:
+                for run in hc.paragraphs[0].runs:
+                    run.underline = True
+            row(tl, ["", "", "", "", ""], Wl, size=4)
+            for r_ in g["rows"]:
+                row(tl, [r_["name"], chf(r_["total"]), "direkt" if r_.get("direct") else f"{r_['share_pct']:.1f}%",
+                         "–" if r_.get("direct") else str(st["days"]), chf(r_["unit_amount"])], Wl, size=7.5)
+            cells = row(tl, ["Total", "", "", "", chf(g["unit_total"])], Wl, size=7.5)
+            cell_border(cells[4], top=("single", 6), bottom=("double", 6))
+        gap(8)
 
-    para(closing or "Die Belege der Nebenkostenabrechnung können Sie nach Absprache innert 30 Tagen bei uns einsehen.", space_after=10)
-    para("Freundliche Grüsse", space_after=18)
-    para(owner.get("name", ""))
+    cp = para(closing or "Die Belege der Nebenkostenabrechnung können Sie nach Absprache innert 30 Tagen bei uns einsehen.",
+              bold=True, size=7.5, before=4, after=12)
+    gp_ = para("Freundliche Grüsse", bold=True, size=9, after=14)
+    cp.paragraph_format.keep_with_next = gp_.paragraph_format.keep_with_next = True
+    para(owner.get("name", ""), bold=True, size=9)
+
+    # leere Absätze in Tabellenzellen (Platzhalter vor/nach verschachtelten Tabellen) flach machen
+    from docx.enum.text import WD_LINE_SPACING
+
+    def flatten(tables):
+        for tb in tables:
+            for r_ in tb.rows:
+                for cell in r_.cells:
+                    for pg in cell.paragraphs:
+                        if not pg.text.strip():
+                            pg.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+                            pg.paragraph_format.line_spacing = Pt(3)
+                    flatten(cell.tables)
+    flatten(doc.tables)
     doc.save(path)
     return path

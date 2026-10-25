@@ -83,6 +83,22 @@ Kontobewegungen.
 
 ![Projekte](docs/screenshots/projekte.png)
 
+### Rest vom Lohn & Vormerkungen
+- Kachel in der Übersicht: Einnahmen − bereits ausgegeben − noch fällige Vertrags-/Kreditzahlungen − vorgemerkte
+  Bestellungen = **frei verfügbar** (Jahresprämien in voller Höhe im Monat der Fälligkeit)
+- **Bestellungen vormerken**: von Hand oder automatisch aus Bestellbestätigungen in Paperless (Tag „Bestellung“,
+  z.B. per Mail-Regel importiert); der Betrag wird aus dem Text gelesen
+- Sobald Rechnung oder Abbuchung vom gleichen Händler mit gleichem Betrag da ist, wird die Vormerkung automatisch erledigt
+
+![Rest vom Lohn](docs/screenshots/rest-vom-lohn.png)
+
+### Verträge & Kredite
+- Verträge mit Preis-Versionen, Kosten pro Monat/Jahr, Kündigungsterminen und Zahlungen aus den Kontoauszügen
+- Kredite mit Restschuld, Zins und Amortisationsplan
+- Vertragsdokumente direkt aus Paperless (über Korrespondent oder Tag)
+
+![Verträge und Kredite](docs/screenshots/vertraege.png)
+
 <details>
 <summary>Weitere Ansicht: Belege nacherfassen</summary>
 
@@ -136,11 +152,18 @@ auf den neuen Stand gebracht. Vorher `data/` sichern schadet nie.
 ## Einrichtung
 
 1. **Übersicht**: Fehlt das Betrags-Feld in Paperless, legt die App es per Knopfdruck an.
-2. **Einstellungen → Budget-Kategorien**: Tags als Kategorien anhaken, Reihenfolge festlegen
-   (hat ein Dokument mehrere, zählt der oberste) und Monatsbudgets eintragen.
-3. **Einstellungen → „Erfassen“ eingrenzen**: z.B. nur Dokumenttyp *Rechnung* und *Quittung*.
-4. **Einnahmen**: Lohn als monatlich wiederkehrend erfassen.
-5. **Einstellungen → Nie im Budget berücksichtigen**: z.B. den Tag für Geschäftsbelege wählen.
+2. **Einstellungen → Verbindung & Status**: zeigt, ob Paperless und Traccar erreichbar sind und ob die
+   benötigten Tags/Felder existieren – fehlende lassen sich per Knopf anlegen.
+3. **Einstellungen → Budget**: Tags als Kategorien anhaken, Reihenfolge festlegen
+   (hat ein Dokument mehrere, zählt der oberste), Monatsbudgets eintragen, Tags „nie im Budget“ wählen.
+4. **Einstellungen → Belege & Erfassen**: z.B. nur Dokumenttyp *Rechnung* und *Quittung*.
+5. **Einnahmen**: Lohn als monatlich wiederkehrend erfassen.
+
+Die Einstellungen sind in Rubriken gegliedert (Budget, Belege, Bank & Abgleich, Vormerkungen, Fahrzeuge,
+Verträge, Immobilien, Daten & Wartung) und werden sofort gespeichert. Unter **Daten & Wartung** gibt es
+Backup/Wiederherstellung der App-Datenbank und CSV-Exporte.
+
+![Einstellungen](docs/screenshots/einstellungen.png)
 
 ### Zweck und „nicht berücksichtigen“
 
@@ -198,6 +221,14 @@ deren Vorzeichen nicht über den Saldo bestätigt werden konnte, sind als „ung
 6. Unter **Kosten** prüfen, ob jeder Beleg die richtige Kostenart hat. „Nicht umlegbar“ (z.B. Unterhalt am Gebäude)
    bleibt Eigentümersache.
 7. **Abrechnung**: Mieter wählen, Akonto prüfen (aus den Mietzinseingängen bzw. laut Vertrag), erzeugen.
+   Das Word-Dokument folgt dem klassischen Aufbau: Brief, Kostenübersicht mit farbigen Gruppen, Detailseiten
+   mit Zuweisung (Anteile, CHF pro Einheit, Ihr Anteil) und optional Heizöl-Verbrauch.
+8. **Zwischenabrechnung** (z.B. bei Auszug): unter *Abrechnung* Art „Zwischenabrechnung“ wählen und den Zeitraum
+   bis zum Stichtag setzen. Es zählen die bis dahin verbuchten Kosten, Akonto nur für die Monate im Zeitraum.
+
+**Heizöl nach Verbrauch:** In der Einrichtung unter *Heizöl-Lagerbestand* die Kostenart Heizöl wählen und den
+Tankstand (Liter, Preis pro 100 l) zu Beginn und Ende der Periode erfassen – bzw. am Stichtag einer
+Zwischenabrechnung. Dann rechnet die App Anfangsbestand + Einkäufe − Endbestand statt der Einkäufe.
 
 So wird gerechnet: Anteil = Betrag × Schlüssel der Wohnung × Nutzungstage ÷ Periodentage. Individuell belastete
 Positionen zählen voll, wenn sie in die Mietdauer fallen. Den Anteil von Leerständen trägt der Eigentümer.
@@ -217,9 +248,57 @@ Liegenschaftskosten zählen standardmässig nicht zum Haushaltsbudget (abschaltb
 
 Der Verbrauch wird nur aus Monaten berechnet, in denen jeder Tankvorgang eine Mengenangabe hat.
 
+**Parkingpay:** Die Parkingpay-Auszüge (PDF aus dem Parkingpay-Konto) in Paperless ablegen und unter
+*Einstellungen → Fahrzeuge → Parkingpay-Auszüge erkennen* den Korrespondenten oder Tag wählen. Bei jedem Fahrzeug
+das **Kennzeichen** (bzw. die Badge-Nr.) eintragen. Unter *Fahrzeuge → Parkingpay-Auszüge → Neue einlesen* liest die App jeden
+Parkvorgang (Datum, Zeit, Ort, Kennzeichen, Betrag) und ordnet ihn dem Fahrzeug zu; unbekannte Kennzeichen lassen
+sich einzeln zuordnen. Im Budget zählt weiterhin die Zahlung an Parkingpay (Aufladung oder Rechnung) – die
+Aufladungen deshalb keinem Fahrzeug zuordnen, sonst zählen sie dort doppelt.
+Im Parkhaus steht im Auszug statt des Kennzeichens oft die Parkingpay-Badge-Nr. – diese beim Fahrzeug einfach
+ebenfalls eintragen (Feld „Kennzeichen / Badge-Nr.“, kommagetrennt).
+
+Optional holt die App die Monatsberichte selbst: den Link zum Monatsbericht aus dem Parkingpay-Konto
+(`…/monthly-report/JJJJ/M?key=…`) unter *Einstellungen → Fahrzeuge* einfügen. Abgeschlossene Monate werden einmal
+geholt, in Paperless abgelegt und danach automatisch eingelesen. Der Link enthält einen persönlichen Schlüssel; die
+App gibt ihn nie an den Browser zurück.
+
+**km-Quelle:** Standard ist der Traccar-Bericht. Liefert ein Gerät einen falschen oder eingefrorenen
+Kilometerzähler, kann pro Fahrzeug „km: aus GPS berechnen“ gewählt werden – die App rechnet die Strecke
+dann selbst aus den GPS-Positionen (einmalig im Hintergrund, danach zwischengespeichert).
+
+## Bestellungen automatisch vormerken (E-Mail)
+
+1. In Paperless einen Tag **Bestellung** anlegen (anderer Name: `ORDER_TAG_NAME` in der `.env`).
+2. Paperless → **E-Mail**: Mailkonto hinzufügen und eine Regel anlegen, z.B.
+   - Betreff enthält `Bestellbestätigung` (oder Absender `@galaxus.ch`, `@digitec.ch`, `@zalando.ch` …)
+   - Aktion: *Mail als .eml verarbeiten* bzw. *Mail und Anhänge* – Tag **Bestellung** zuweisen,
+     Korrespondent aus dem Absender
+3. Die App übernimmt neue Bestellbestätigungen beim Öffnen der Übersicht. Erkennt sie den Betrag nicht,
+   in Paperless das Feld „Total“ setzen oder die Vormerkung in der App bearbeiten.
+
+Dokumente mit dem Tag „Bestellung“ zählen nie als Ausgabe – gezählt wird später die Rechnung oder Abbuchung.
+Die Rechnung bzw. Abbuchung wird standardmässig 30 Tage nach der Bestellung erwartet (`ORDER_EXPECT_DAYS`).
+
+## Verträge & Kredite
+
+Im Tab **Verträge** werden laufende Verträge (Versicherungen, Krankenkasse, Telefon/Internet, Energie,
+Abos …) und Kredite (Hypothek, Leasing, Privatkredit) verwaltet:
+
+- **Versionen**: jede Preis- oder Konditionsänderung ab Datum, optional mit Paperless-Beleg
+  („→ als Version“ übernimmt Datum und Betrag aus einer Rechnung)
+- **Kosten** pro Intervall, pro Monat und pro Jahr – Summen oben im Tab
+- **Laufzeit und Kündigung**: aus Beginn, Verlängerung (Monate) und Kündigungsfrist wird der nächste
+  Kündigungstermin berechnet; Termine in den nächsten 4 Monaten werden hervorgehoben
+- **Zahlungen** aus den Kontoauszügen: über „Stichworte Bankbuchung“ automatisch zugeordnet oder manuell;
+  Vergleich bezahlt / erwartet pro Jahr
+- **Dokumente**: alle Paperless-Dokumente des gewählten Korrespondenten und/oder Tags
+- **Kredite**: Restschuld nach Plan (Anfangsbetrag minus Amortisation), Zins pro Jahr,
+  Restschuld-Verlauf der nächsten Jahre. Bleibt der Betrag leer, wird die Rate aus Zins und Amortisation berechnet.
+
 ## Konfiguration
 
-Alle Einstellungen in der `.env`:
+In der `.env` stehen Adressen und Zugangsdaten. Namen von Tags und Feldern (`AMOUNT_FIELD_NAME`, `PAID_*`,
+`ORDER_*`, `NK_TAG_NAME`) sind nur Startwerte – sie lassen sich danach in der App unter *Einstellungen* ändern.
 
 | Variable | Standard | Bedeutung |
 |---|---|---|
@@ -241,7 +320,7 @@ Alle Einstellungen in der `.env`:
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` | leer | Optionaler Login |
 
 Budgets, Einnahmen, Regeln, eingelesene Buchungen und Fahrzeuge liegen in `./data/budget.db` (SQLite) –
-diesen Ordner ins Backup aufnehmen.
+diesen Ordner ins Backup aufnehmen oder unter *Einstellungen → Daten & Wartung* ein Backup herunterladen.
 
 ## Was in Paperless verändert wird
 
@@ -260,9 +339,13 @@ speichert die App nur in ihrer eigenen Datenbank – Paperless bleibt davon unbe
 app/main.py          FastAPI-Backend: Proxy zur Paperless-/Traccar-API, SQLite, Auswertungen
 app/bank.py          Kontoauszug-Leser und Abgleich-Logik
 app/vehicles.py      Tankkarten-Rechnungen lesen, Fahrzeug-Kennzahlen
+app/parking.py       Parkingpay-Auszüge lesen (Parkvorgänge mit Kennzeichen)
 app/purpose.py       Zweck aus dem Rechnungstext lesen
 app/realestate.py    Nebenkosten berechnen, Abrechnung als Word erzeugen
 app/re_api.py        API für Liegenschaften, Mieten, Projekte und Zuordnungen
+app/contracts_api.py Verträge und Kredite (Versionen, Zahlungen, Kündigungstermine, Restschuld)
+app/planning_api.py  Vormerkungen (Bestellungen) und „Rest vom Lohn“
+app/static/settings.js  Einstellungen (Rubriken, Sofort-Speichern, Status, Backup)
 app/static/          Frontend (HTML, CSS, Vanilla JS, Chart.js lokal eingebunden)
 ```
 

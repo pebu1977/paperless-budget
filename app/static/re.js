@@ -199,6 +199,7 @@ $("#reBody").addEventListener("click", async (e) => {
       tenancies: { unit_id: p.units[0]?.id, tenant_name: "Neue Mieterin / neuer Mieter", start: today, rent: 0, akonto: 0 },
       "fixed-costs": { property_id: p.id, category_id: p.categories[0]?.id, name: "Fixkosten", amount: 0, interval: "jahr" },
       "manual-costs": { property_id: p.id, category_id: p.categories[0]?.id, date: today, description: "Manuelle Kosten", amount: 0 },
+      "heating-stock": { property_id: p.id, date: today, liters: 0 },
     }[add];
     if (!defaults) return;
     if ((add === "tenancies" && !p.units.length) || (["fixed-costs", "manual-costs"].includes(add) && !p.categories.length)) {
@@ -255,13 +256,25 @@ async function reStatement(p) {
   if (!opts.some(([k]) => k === RE.stSel)) RE.stSel = opts[0][0];
   const q = RE.stSel[0] === "t" ? `tenancy_id=${RE.stSel.slice(1)}` : `unit_id=${RE.stSel.slice(1)}`;
   const ak = RE.akontoOverride != null ? `&akonto=${RE.akontoOverride}` : "";
-  const [st, hist] = await Promise.all([api(`/api/properties/${p.id}/statement?year=${RE.year}&${q}${ak}`), api(`/api/nk-statements?property_id=${p.id}`)]);
+  const sm = p.start_month || 1, pStart = `${RE.year}-${String(sm).padStart(2, "0")}-01`;
+  const pEnd = new Date(Date.UTC(RE.year + 1, sm - 1, 0)).toISOString().slice(0, 10);
+  if (RE.stMode === "interim") {
+    const ten = RE.stSel[0] === "t" ? p.tenancies.find((t) => t.id === Number(RE.stSel.slice(1))) : null;
+    const today = new Date().toISOString().slice(0, 10);
+    if (!RE.stFrom || RE.stFrom < pStart || RE.stFrom > pEnd) RE.stFrom = pStart;
+    if (!RE.stTo || RE.stTo < RE.stFrom || RE.stTo > pEnd) RE.stTo = ten?.end && ten.end >= pStart && ten.end <= pEnd ? ten.end : (today < pEnd ? today : pEnd);
+  }
+  const per = RE.stMode === "interim" ? `&period_from=${RE.stFrom}&period_to=${RE.stTo}` : "";
+  const [st, hist] = await Promise.all([api(`/api/properties/${p.id}/statement?year=${RE.year}&${q}${ak}${per}`), api(`/api/nk-statements?property_id=${p.id}`)]);
   const h = st.heating, tenant = RE.stSel[0] === "t";
   const tr = (a, b, cls = "") => `<tr class="${cls}"><td>${a}</td><td class="num">${b}</td></tr>`;
   $("#reBody").innerHTML = `<div class="grid2">
     <div class="card pv">
       <div class="cardhead"><h3>Vorschau</h3><select id="stPick">${opts.map(([k, t]) => `<option value="${k}" ${k === RE.stSel ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>
-      <div class="muted">${esc(st.unit.name)} · ${fmtDate(st.stay[0])} – ${fmtDate(st.stay[1])} · ${st.days} von ${st.days_total} Tagen</div>
+      <div class="muted">${st.interim ? "<b>Zwischenabrechnung</b> · " : ""}${esc(st.unit.name)} · ${fmtDate(st.stay[0])} – ${fmtDate(st.stay[1])} · ${st.days} von ${st.days_total} Tagen</div>
+      ${st.oil ? `<div class="muted small" style="margin-top:4px">🛢 Heizöl ${st.oil.complete ? `nach Verbrauch: ${fmtN(st.oil.liters)} Liter = ${fmt(st.oil.amount)} (Bestand ${fmtDate(st.oil.start.date)} → ${fmtDate(st.oil.end.date)})`
+        : `<span class="neg">nach Einkauf – Tankstand-Ablesung ${!st.oil.start ? "zum Beginn" : "zum Ende"} der Periode fehlt (Einrichtung → Heizöl-Lagerbestand)</span>`}</div>` : ""}
+      ${st.interim ? `<div class="muted small" style="margin-top:4px">Es zählen nur Kosten, die im Zeitraum verbucht sind (Jahresrechnungen, z.B. Wasser, fehlen evtl. noch).</div>` : ""}
       <table>
         ${h.total ? tr("Raumheizung", `${fmt(h.room_unit)} <span class="muted small">(${h.room_share_pct} % von ${fmt(h.room_total)})</span>`) + tr("Warmwasser", `${fmt(h.water_unit)} <span class="muted small">(${h.water_share_pct} % von ${fmt(h.water_total)})</span>`) : ""}
         ${st.groups.map((g) => tr(esc(g.name), fmt(g.unit_total))).join("")}
@@ -276,6 +289,10 @@ async function reStatement(p) {
     <div class="card">
       <h3>Erzeugen</h3>
       <div class="formgrid">
+        <label>Art<select id="stMode"><option value="year" ${RE.stMode !== "interim" ? "selected" : ""}>Jahresabrechnung</option><option value="interim" ${RE.stMode === "interim" ? "selected" : ""}>Zwischenabrechnung</option></select>
+          <span class="muted small">Zwischenabrechnung z.B. bei Auszug während der Periode</span></label>
+        ${RE.stMode === "interim" ? `<label>von<input id="stFrom" type="date" min="${pStart}" max="${pEnd}" value="${RE.stFrom}"></label>
+          <label>bis (Stichtag)<input id="stTo" type="date" min="${pStart}" max="${pEnd}" value="${RE.stTo}"></label>` : ""}
         ${tenant ? `<label>Akonto CHF<input id="stAkonto" type="number" step="0.05" value="${st.akonto}"><span class="muted small">erhalten ${fmt(st.akonto_received)} · laut Vertrag ${fmt(st.akonto_expected)}</span></label>` : ""}
         <label>Rechnungsdatum<input id="stDate" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
         <label class="check"><input id="stUpload" type="checkbox" checked> PDF in Paperless ablegen</label>
@@ -283,15 +300,19 @@ async function reStatement(p) {
       <div class="row" style="margin-top:12px"><button id="stGen" class="primary">Word & PDF erzeugen</button></div>
       <div id="stResult" style="margin-top:10px"></div>
       <h4 style="margin-top:18px">Bisherige Abrechnungen</h4>
-      ${hist.length ? hist.map((x) => `<div class="invitem"><span>${fmtDate(x.created_at.slice(0, 10))} · ${fmtDate(x.period_start)}–${fmtDate(x.period_end)}
+      ${hist.length ? hist.map((x) => `<div class="invitem"><span>${fmtDate(x.created_at.slice(0, 10))} · ${x.interim ? "Zwischenabr. " : ""}${fmtDate(x.period_start)}–${fmtDate(x.period_end)}
         ${x.docx ? `<a href="/api/files/${encodeURIComponent(x.docx)}">Word</a>` : ""} ${x.pdf ? `· <a href="/api/files/${encodeURIComponent(x.pdf)}" target="_blank">PDF</a>` : ""}</span><b class="num">${fmt(x.saldo)}</b></div>`).join("") : `<div class="muted small">Noch keine.</div>`}
     </div></div>`;
   const ai = $("#stAkonto");
   if (ai) ai.onchange = () => { RE.akontoOverride = num(ai.value); renderRE(); };
+  $("#stMode").onchange = (e) => { RE.stMode = e.target.value; RE.akontoOverride = null; renderRE(); };
+  if ($("#stFrom")) { $("#stFrom").onchange = (e) => { RE.stFrom = e.target.value; RE.akontoOverride = null; renderRE(); };
+    $("#stTo").onchange = (e) => { RE.stTo = e.target.value; RE.akontoOverride = null; renderRE(); }; }
   $("#stGen").onclick = async (e) => {
     e.target.disabled = true; e.target.textContent = "Erzeuge …";
     try {
       const body = { year: RE.year, invoice_date: $("#stDate").value, upload: $("#stUpload").checked, akonto: ai ? num(ai.value) : null };
+      if (RE.stMode === "interim") { body.period_from = RE.stFrom; body.period_to = RE.stTo; }
       if (tenant) body.tenancy_id = Number(RE.stSel.slice(1)); else body.unit_id = Number(RE.stSel.slice(1));
       const r = await api(`/api/properties/${p.id}/statement/generate`, { method: "POST", body: JSON.stringify(body) });
       $("#stResult").innerHTML = `<div class="card hint" style="margin:0">✓ Erzeugt: <a href="${r.docx}">Word herunterladen</a>${r.pdf ? ` · <a href="${r.pdf}" target="_blank">PDF öffnen</a>` : ""}
@@ -351,6 +372,14 @@ function reSetup(p) {
       { f: "heating", label: "Heizpool", type: "check", w: "70px" }, { f: "unit_label", label: "Einheit", w: "80px" },
       { f: "keywords", label: "Stichworte", ph: "heizöl, brennstoff" }])}</div>
 
+  <div class="card"><h3>Heizöl-Lagerbestand</h3>
+    <p class="muted small">Optional: Heizöl nach <b>Verbrauch</b> abrechnen statt nach Einkauf – Anfangsbestand + Einkäufe − Endbestand.
+      Dafür den Tankstand zu Beginn und Ende der Periode (bzw. am Stichtag einer Zwischenabrechnung) erfassen.</p>
+    <div class="field"><div class="lbl"><b>Kostenart Heizöl</b><span>leer = nach Einkauf abrechnen</span></div>
+      <div><select data-ent="properties" data-id="${p.id}" data-f="oil_category_id">${[["", "– nach Einkauf –"], ...p.categories.filter((c) => c.heating).map((c) => [c.id, `${c.grp} · ${c.name}`])]
+        .map(([k, l]) => `<option value="${k}" ${String(k) === String(p.oil_category_id ?? "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div></div>
+    <div id="stockTable">…</div></div>
+
   <div class="card"><h3>Mietverhältnisse</h3>
     <p class="muted small">Stichworte = Text in der Mietzahlung (z.B. Name), mehrere mit Komma; „+“ verbindet Begriffe. Kein Ende = laufend.</p>
     <div class="tablewrap wide">${etable("tenancies", p.tenancies, [
@@ -373,6 +402,11 @@ function reSetup(p) {
   <div class="card" id="manualCard"><h3>Manuelle Kosten</h3>
     <p class="muted small">Einzelne Kosten ohne Paperless-Beleg (z.B. Eigenleistung, abgelesener Betrag). Datum bestimmt die Periode.</p>
     <div id="manualTable">…</div></div>`;
+  api(`/api/re/heating-stock?property_id=${p.id}`).then((rows) => {
+    $("#stockTable").innerHTML = etable("heating-stock", rows.sort((a, b) => b.date.localeCompare(a.date)), [
+      { f: "date", label: "Ablesung am", type: "date", w: "150px" }, { f: "liters", label: "Tankstand Liter", type: "number", w: "140px" },
+      { f: "price", label: "Preis CHF / 100 l", type: "number", w: "140px", ph: "z.B. 114.90" }, { f: "note", label: "Notiz", ph: "z.B. Ablesung Periodenende" }]);
+  });
   api(`/api/re/manual-costs?property_id=${p.id}`).then((rows) => {
     $("#manualTable").innerHTML = etable("manual-costs", rows.sort((a, b) => b.date.localeCompare(a.date)), [
       { f: "date", label: "Datum", type: "date", w: "130px" }, { f: "description", label: "Bezeichnung" },
