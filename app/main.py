@@ -807,12 +807,15 @@ async def payslip_docs_found() -> list[dict]:
         queries.append({"document_type__id__in": ",".join(map(str, st["payslip_document_type_ids"]))})
     if st.get("payslip_tag_ids"):
         queries.append({"tags__id__in": ",".join(map(str, st["payslip_tag_ids"]))})
+    complete = True
     for q in queries:
         try:
             for d in await pl_all("/api/documents/", {**base, **q}):
                 found[d["id"]] = d
         except HTTPException:
-            pass
+            complete = False
+    if complete:
+        prune_parsed("payslip", set(found))
     return list(found.values())
 
 
@@ -2007,6 +2010,22 @@ def is_fuel_doc(doc: dict, st: dict) -> bool:
         set(doc.get("tags") or []) & set(st.get("fuel_tag_ids") or []))
 
 
+def prune_parsed(kind: str, valid_ids: set) -> int:
+    """Eingelesene Dokumente entfernen, die nicht mehr dazugehören (Korrespondent/Tag korrigiert oder gelöscht)."""
+    table, entries = {"fuel": ("fuel_docs", "fuel_entries"), "parking": ("parking_docs", "parking_entries"),
+                      "payslip": ("payslips", None)}[kind]
+    with db() as con:
+        stale = [r[0] for r in con.execute(f"SELECT doc_id FROM {table}") if r[0] not in valid_ids]
+        for d in stale:
+            if entries:
+                con.execute(f"DELETE FROM {entries} WHERE doc_id = ?", (d,))
+            con.execute(f"DELETE FROM {table} WHERE doc_id = ?", (d,))
+            con.execute("DELETE FROM doc_purpose WHERE doc_id = ? AND source != 'manuell'", (d,))
+    if stale and kind == "payslip":
+        _payslip_cache["t"] = 0
+    return len(stale)
+
+
 @app.get("/api/fuel-docs")
 async def fuel_docs():
     st = get_settings()
@@ -2023,6 +2042,7 @@ async def fuel_docs():
     with db() as con:
         parsed = {r["doc_id"]: dict(r) for r in con.execute("SELECT * FROM fuel_docs")}
     found = {k: d for k, d in found.items() if is_fuel_doc(d, st)}
+    prune_parsed("fuel", set(found))
     out = [{
         "id": d["id"], "title": d.get("title"), "date": str(d.get("created") or "")[:10],
         "url": f"{PAPERLESS_PUBLIC_URL}/documents/{d['id']}/details",
@@ -2128,6 +2148,8 @@ async def parking_docs():
     if st.get("parking_tag_ids"):
         for d in await pl_all("/api/documents/", {**base, "tags__id__in": ",".join(map(str, st["parking_tag_ids"]))}):
             found[d["id"]] = d
+    found = {k: d for k, d in found.items() if is_parking_doc(d, st)}
+    prune_parsed("parking", set(found))
     with db() as con:
         parsed = {r["doc_id"]: dict(r) for r in con.execute("SELECT * FROM parking_docs")}
     out = [{"id": d["id"], "title": d.get("title"), "date": str(d.get("created") or "")[:10],
@@ -2264,6 +2286,11 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
     meta = await get_meta()
 
     docs = await fetch_expenses(first, end) if meta["amount_field"] and vehicles else []
+    for lister in (fuel_docs, parking_docs):     # entfernt Einträge von Dokumenten, die nicht mehr dazugehören
+        try:
+            await lister()
+        except HTTPException:
+            pass
     with db() as con:
         fuel_doc_ids = {r[0] for r in con.execute("SELECT doc_id FROM fuel_docs")}
         fuel = [dict(r) for r in con.execute(
