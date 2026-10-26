@@ -333,3 +333,9 @@ dialog#orderDlg .row { flex-wrap: wrap; }
   .st-grid { grid-template-columns: 1fr; } .field { grid-template-columns: 1fr; gap: 6px; }
 }
 textarea { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; }
+.ps-totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.ps-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.ps-head { margin-bottom: 6px; }
+.ps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 2px 22px; }
+.ps-grid > div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed var(--line); padding: 3px 0; }
+#psTable input { width: 100%; }

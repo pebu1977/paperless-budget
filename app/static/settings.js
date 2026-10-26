@@ -196,6 +196,8 @@ function setPlan() {
   $("#setOrderTag").innerHTML = selOpts(o, cur);
   $("#setOrderTagCreate").hidden = !missing;
   $("#setExpectDays").value = S.settings.order_expect_days || 30;
+  $("#psTypes").innerHTML = chipsHtml(S.meta.document_types, S.settings.payslip_document_type_ids || [], "payslip_document_type_ids");
+  $("#psTags").innerHTML = chipsHtml(S.meta.tags, S.settings.payslip_tag_ids || [], "payslip_tag_ids");
 }
 $("#setOrderTag").onchange = async (e) => { await saveSetting({ order_tag_name: e.target.value }); setPlan(); };
 $("#setOrderTagCreate").onclick = async () => {
@@ -212,28 +214,7 @@ async function setVehicles() {
   $("#fuelTags").innerHTML = chipsHtml(S.meta.tags, S.settings.fuel_tag_ids || [], "fuel_tag_ids");
   $("#parkCorr").innerHTML = chipsHtml(S.meta.correspondents, S.settings.parking_correspondent_ids || [], "parking_correspondent_ids");
   $("#parkTags").innerHTML = chipsHtml(S.meta.tags, S.settings.parking_tag_ids || [], "parking_tag_ids");
-  drawPp();
 }
-function drawPp() {
-  const set = S.settings.parkingpay_report_url === "gespeichert";
-  $("#setPpUrl").value = ""; $("#setPpUrl").placeholder = set ? "Link gespeichert – zum Ersetzen neuen Link einfügen" : "https://parkingpay.ch/ui-api/customer-account/monthly-report/…";
-  $("#setPpClear").hidden = !set;
-  $("#setPpStart").value = S.settings.parkingpay_start || "";
-  const got = S.settings.parkingpay_fetched || [];
-  $("#setPpInfo").textContent = set ? (got.length ? `Bereits geholt: ${got.map((m) => m.split("-").reverse().join(".")).join(", ")}` : "Noch nichts geholt.") : "";
-}
-$("#setPpUrl").onchange = async (e) => { if (e.target.value.trim()) { await saveSetting({ parkingpay_report_url: e.target.value.trim() }, "Link gespeichert"); drawPp(); } };
-$("#setPpClear").onclick = async () => { await saveSetting({ parkingpay_report_url: "" }, "Link entfernt"); drawPp(); };
-$("#setPpStart").onchange = (e) => saveSetting({ parkingpay_start: e.target.value || "" });
-$("#setPpFetch").onclick = async (e) => {
-  e.target.disabled = true;
-  try {
-    const r = await api("/api/parking/fetch", { method: "POST" });
-    toast(r.errors.length ? r.errors[0] : r.fetched.length ? `${r.fetched.length} Monatsbericht(e) in Paperless abgelegt` : "Keine neuen Monate", r.errors.length > 0);
-    S.settings = await api("/api/settings"); drawPp();
-  } catch (err) { toast(err.message, true); }
-  e.target.disabled = false;
-};
 function drawVehicleCards() {
   const devs = S.tcDevices || [];
   const devName = (id) => devs.find((d) => d.id === id)?.name;

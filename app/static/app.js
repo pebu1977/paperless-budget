@@ -403,12 +403,103 @@ async function renderIncome() {
       <td class="num"><button data-edit="${i.id}">Bearbeiten</button> <button class="danger" data-del="${i.id}">Löschen</button></td>
     </tr>`).join("") : `<tr><td colspan="5" class="empty">Noch keine Einnahmen erfasst.</td></tr>`;
   const sum = await api(`/api/summary?month=${S.month}`).catch(() => null);
+  drawIncomeRules();
+  drawPayslips();
   $("#incMonth").innerHTML = sum ? (sum.incomes.length
-    ? `<table class="table"><tbody>${sum.incomes.map((i) => `<tr><td>${esc(i.description)}</td><td class="num">${fmt(i.amount)}</td></tr>`).join("")}</tbody>
+    ? `<table class="table"><tbody>${sum.incomes.map((i) => `<tr><td>${esc(i.description)}
+        ${i.source === "bank" ? ` <span class="srcb Bank" title="${esc(i.detail || "")}">Bank ${fmtDate(i.date)}</span>` : i.source === "erwartet" ? ` <span class="srcb Manuell" title="${esc(i.detail || "")}">erwartet ${fmtDate(i.date)}</span>`
+          : i.source === "Lohnabrechnung" ? ` <span class="srcb Beleg" title="${esc(i.detail || "")}">Lohnabrechnung ${fmtDate(i.date)}</span>` : ""}</td>
+        <td class="num">${fmt(i.amount)}</td></tr>`).join("")}</tbody>
        <tfoot><tr><td>Total ${esc(monthLabel(S.month))}</td><td class="num">${fmt(sum.total_income)}</td></tr></tfoot></table>`
     : `<div class="empty">Keine Einnahmen in diesem Monat.</div>`) : `<div class="muted small">Monatsübersicht nicht verfügbar.</div>`;
 }
 
+let psAuto = false;
+async function drawPayslips() {
+  const yNow = Number(S.month.slice(0, 4));
+  if (!$("#psYear").options.length) $("#psYear").innerHTML = [0, 1, 2, 3].map((i) => `<option ${i === 0 ? "selected" : ""}>${new Date().getFullYear() - i}</option>`).join("");
+  const year = Number($("#psYear").value) || yNow;
+  if (!psAuto) {   // einmal pro Seitenaufruf neue Abrechnungen einlesen
+    psAuto = true;
+    try { const r = await api("/api/payslips/parse-new", { method: "POST" }); if (r.parsed) toast(`${r.parsed} Lohnabrechnung(en) eingelesen${r.parsed - r.ok ? `, ${r.parsed - r.ok} nicht erkannt` : ""}`); } catch {}
+  }
+  const d = await api(`/api/payslips?year=${year}`);
+  const k = (label, v) => v ? `<div><span class="muted small">${label}</span><b class="num">${fmt(v)}</b></div>` : "";
+  $("#psTotals").innerHTML = d.totals.map((p) => `<div class="ps-card"><div class="ps-head"><b>${esc(p.person)}</b> <span class="muted small">${esc(p.employers.join(", "))} · ${p.count} Abrechnung(en) ${year}</span></div>
+      <div class="ps-grid">${k("Brutto", p.gross)}${k("davon Kinderzulagen", p.child_allowance)}${k("AHV/IV/EO", p.ahv)}${k("ALV", p.alv)}${k("Pensionskasse", p.bvg)}
+      ${k("Versicherungen", p.insurance)}${k("Quellensteuer", p.tax)}${k("übrige Abzüge", p.other)}${k("Netto", p.net)}${k("ausbezahlt", p.payout)}</div></div>`).join("");
+  $("#psBody").innerHTML = d.payslips.length ? d.payslips.map((r) => r.ok ? `<tr>
+      <td>${esc(r.month || "")}</td>
+      <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.person || "–")}</a> <span class="muted small">· ${esc(r.employer || "")}</span>
+        ${r.deductions.length ? `<div class="it-sub" title="${esc(r.deductions.map((x) => `${x.label}: ${x.amount.toFixed(2)}`).join("\n"))}">${esc(r.deductions.map((x) => x.label).slice(0, 4).join(", "))}${r.deductions.length > 4 ? " …" : ""}</div>` : ""}</td>
+      <td class="num">${fmt(r.gross)}</td><td class="num">${r.deductions_total ? "− " + fmtPos(r.deductions_total) : "–"}</td><td class="num">${fmt(r.net || 0)}</td>
+      <td class="num"><b>${fmt(r.payout)}</b></td>
+      <td>${r.bank ? `<span class="pill">✓ ${fmtDate(r.bank.date)}</span>` : `<span class="pill grey" title="Noch keine passende Gutschrift – zählt aus der Abrechnung">offen</span>`}</td></tr>`
+    : `<tr data-ps="${r.doc_id}"><td><input name="month" type="month" value="${esc(r.month || "")}"></td>
+      <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title || "Lohnabrechnung")}</a> <span class="neg small">nicht erkannt – Werte eintragen</span>
+        <input name="person" value="${esc(r.person || "")}" placeholder="Person"></td>
+      <td><input name="gross" type="number" step="0.05" value="${r.gross ?? ""}" placeholder="Brutto"></td><td></td>
+      <td><input name="net" type="number" step="0.05" value="${r.net ?? ""}" placeholder="Netto"></td>
+      <td><input name="payout" type="number" step="0.05" value="${r.payout ?? ""}" placeholder="ausbezahlt"></td><td></td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted small">Keine Lohnabrechnungen ${year} gefunden.</td></tr>`;
+}
+$("#psYear").onchange = drawPayslips;
+$("#psParseNew").onclick = async (e) => {
+  e.target.disabled = true;
+  try { const r = await api("/api/payslips/parse-new", { method: "POST" }); toast(r.parsed ? `${r.parsed} Lohnabrechnung(en) eingelesen` : "Keine neuen Lohnabrechnungen"); renderIncome(); }
+  catch (err) { toast(err.message, true); }
+  e.target.disabled = false;
+};
+$("#psBody").addEventListener("change", async (e) => {
+  const tr = e.target.closest("[data-ps]"); if (!tr) return;
+  const v = e.target.type === "number" ? (e.target.value === "" ? null : Number(e.target.value)) : e.target.value || null;
+  try { await api(`/api/payslips/${tr.dataset.ps}`, { method: "PUT", body: JSON.stringify({ [e.target.name]: v }) }); toast("Gespeichert"); }
+  catch (err) { toast(err.message, true); }
+});
+async function drawIncomeRules() {
+  const [rules, credits] = await Promise.all([api("/api/income-rules"), api(`/api/income-credits?month=${S.month}`)]);
+  $("#irBody").innerHTML = rules.length ? rules.map((r) => `<tr data-ir="${r.id}">
+      <td><input name="keyword" value="${esc(r.keyword)}" placeholder="z.B. Muster AG + Lohn"></td>
+      <td><input name="label" value="${esc(r.label)}"></td>
+      <td><input name="expected" type="number" step="0.05" value="${r.expected ?? ""}" placeholder="optional"></td>
+      <td><input name="day" type="number" min="1" max="31" value="${r.day ?? ""}" placeholder="25"></td>
+      <td><input name="active" type="checkbox" ${r.active ? "checked" : ""}></td>
+      <td><button class="linkbtn danger" data-irdel="${r.id}">löschen</button></td></tr>`).join("")
+    : `<tr><td colspan="6" class="muted small">Noch keine Regel – unten bei einer Gutschrift „als Einnahme erkennen“ wählen oder „+ Regel“.</td></tr>`;
+  $("#irCredits").innerHTML = credits.length ? credits.map((t) => `<div class="invitem"><span>${fmtDate(t.date)} · <b>${esc(t.merchant || t.text.slice(0, 50))}</b>
+      <span class="muted small">${esc(t.text.slice(0, 70))}</span></span>
+      <span class="row"><b class="num">${fmt(t.amount)}</b>${t.rule ? `<span class="pill">💰 ${esc(t.rule)}</span>` : t.rent ? `<span class="pill grey">Miete</span>`
+        : t.status === "ignored" ? `<span class="pill grey">ignoriert</span>` : `<button class="linkbtn" data-irnew="${esc(t.merchant || t.text.split(" · ")[0] || "")}" data-amt="${t.amount}" data-day="${Number(t.date.slice(8))}">als Einnahme erkennen</button>`}</span></div>`).join("")
+    : `<div class="muted small">Keine Gutschriften im ${esc(monthLabel(S.month))} – Kontoauszüge unter <a href="#" data-goto="bank">Abgleich</a> einlesen.</div>`;
+}
+async function saveIncomeRule(tr) {
+  const q = (n) => tr.querySelector(`[name=${n}]`);
+  const body = { keyword: q("keyword").value, label: q("label").value, expected: q("expected").value === "" ? null : Number(q("expected").value),
+    day: q("day").value === "" ? null : Number(q("day").value), active: q("active").checked };
+  try { await api(`/api/income-rules/${tr.dataset.ir}`, { method: "PUT", body: JSON.stringify(body) }); toast("Gespeichert"); renderIncome(); }
+  catch (err) { toast(err.message, true); }
+}
+$("#irBody").addEventListener("change", (e) => { const tr = e.target.closest("[data-ir]"); if (tr) saveIncomeRule(tr); });
+$("#irBody").addEventListener("click", async (e) => {
+  const id = e.target.dataset.irdel; if (!id || !confirm("Regel löschen?")) return;
+  await api(`/api/income-rules/${id}`, { method: "DELETE" }); renderIncome();
+});
+$("#irAdd").onclick = async () => {
+  const r = await openDialog({ title: "Einnahme automatisch erkennen", label: "Stichwort in der Gutschrift (z.B. Name des Arbeitgebers)", ok: "Anlegen" });
+  if (!r || !r.value) return;
+  await api("/api/income-rules", { method: "POST", body: JSON.stringify({ keyword: r.value, label: "Lohn" }) }); renderIncome();
+};
+$("#irCredits").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-irnew]"); if (!b) return;
+  const r = await openDialog({ title: "Als Einnahme erkennen", sub: "Alle Gutschriften mit diesem Stichwort zählen künftig als Einnahme.",
+    label: "Stichwort", value: b.dataset.irnew, ok: "Weiter" });
+  if (!r || !r.value) return;
+  const l = await openDialog({ title: "Bezeichnung", label: "z.B. Lohn Peter, Kindergeld, AHV", value: "Lohn", ok: "Anlegen" });
+  if (!l) return;
+  await api("/api/income-rules", { method: "POST", body: JSON.stringify({ keyword: r.value, label: l.value || "Lohn",
+    expected: Number(b.dataset.amt), day: Number(b.dataset.day) }) });
+  toast("Regel angelegt – erwarteter Betrag und Zahltag aus dieser Gutschrift übernommen"); renderIncome();
+});
 const incForm = $("#incForm");
 incForm.recurring.onchange = () => ($(".endDate").hidden = !incForm.recurring.checked);
 function resetIncForm() {
@@ -494,7 +585,7 @@ function txRow(t) {
   } else if (k === "ignored") {
     act = `<span class="pill grey">ignoriert</span><button class="linkbtn" data-act="unignore">zurückholen</button>`;
   } else if (k === "credit") {
-    act = `<span class="pill grey">${t.rent ? "Mietzahlung" : "Gutschrift"}</span><button class="linkbtn" data-act="ignore">ignorieren</button><button class="linkbtn" data-act="flip">± Vorzeichen</button>`;
+    act = `<span class="pill grey">${t.rent ? "Mietzahlung" : t.income ? "💰 " + esc(t.income) : "Gutschrift"}</span><button class="linkbtn" data-act="ignore">ignorieren</button><button class="linkbtn" data-act="flip">± Vorzeichen</button>`;
   } else {
     if (t.candidates.length) {
       const opts = t.candidates.map((c) => `<option value="${c.id}">${esc(c.title)} · ${fmtDate(c.date)}${c.correspondent ? " · " + esc(corrName(c.correspondent)) : ""}${c.excluded ? " (nicht im Budget)" : ""}</option>`).join("");
@@ -777,11 +868,9 @@ function drawParking(list, unassigned) {
 }
 let parkAutoDone = false;
 async function parkingAuto(pdocs) {
-  // einmal pro Seitenaufruf: neue Monatsberichte holen (falls Link hinterlegt) und ungelesene Auszüge einlesen
+  // einmal pro Seitenaufruf: neue Parkingpay-Auszüge aus Paperless einlesen
   if (parkAutoDone) return; parkAutoDone = true;
   try {
-    const f = await api("/api/parking/fetch?auto=true", { method: "POST" });
-    if (f.fetched?.length) toast(`${f.fetched.length} Parkingpay-Monatsbericht(e) geholt – Paperless verarbeitet sie`);
     if (pdocs.some((d) => !d.parsed_at)) {
       const r = await api("/api/parking-docs/parse-new", { method: "POST" });
       if (r.parsed) { parkResultToast(r.results); if (S.view === "vehicles") renderVehicles(); }

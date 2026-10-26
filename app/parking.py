@@ -143,7 +143,7 @@ def _amount(s: str) -> float:
 
 
 def parse_parking_statement(text: str) -> list[ParkingEntry]:
-    if re.search(r"parkingpay|parkvorgang|digitalparking", text or "", re.IGNORECASE):
+    if re.search(r"parkvorgang", text or "", re.IGNORECASE):   # echter Parkingpay-Kontoauszug
         found = parse_parkingpay(text)
         if found:
             return found

@@ -157,7 +157,12 @@ auf den neuen Stand gebracht. Vorher `data/` sichern schadet nie.
 3. **Einstellungen → Budget**: Tags als Kategorien anhaken, Reihenfolge festlegen
    (hat ein Dokument mehrere, zählt der oberste), Monatsbudgets eintragen, Tags „nie im Budget“ wählen.
 4. **Einstellungen → Belege & Erfassen**: z.B. nur Dokumenttyp *Rechnung* und *Quittung*.
-5. **Einnahmen**: Lohn als monatlich wiederkehrend erfassen.
+5. **Einnahmen**: unter *Automatisch aus Kontoauszügen* eine Regel für den Lohn anlegen (Stichwort, z.B. Name des
+   Arbeitgebers – am einfachsten bei der Lohn-Gutschrift „als Einnahme erkennen“ klicken). Erkannte Gutschriften zählen als
+   Einnahme; fehlt sie im laufenden Monat noch, zählt der erwartete Betrag. Andere Einnahmen von Hand erfassen.
+   **Lohnabrechnungen** (Titel mit „Lohnabrechnung“ oder Dokumenttyp/Tag) liest die App ebenfalls: Brutto, Abzüge
+   (AHV/ALV, PK, Versicherungen, Quellensteuer), Netto und ausbezahlter Betrag – mit Abgleich gegen die Gutschrift und
+   Jahresübersicht pro Person (praktisch für die Steuererklärung). Ohne Gutschrift zählt der Betrag aus der Abrechnung.
 
 Die Einstellungen sind in Rubriken gegliedert (Budget, Belege, Bank & Abgleich, Vormerkungen, Fahrzeuge,
 Verträge, Immobilien, Daten & Wartung) und werden sofort gespeichert. Unter **Daten & Wartung** gibt es
@@ -259,10 +264,6 @@ Aufladungen deshalb keinem Fahrzeug zuordnen, sonst zählen sie dort doppelt.
 Im Parkhaus steht im Auszug statt des Kennzeichens oft die Parkingpay-Badge-Nr. – diese beim Fahrzeug einfach
 ebenfalls eintragen (Feld „Kennzeichen / Badge-Nr.“, kommagetrennt).
 
-Optional holt die App die Monatsberichte selbst: den Link zum Monatsbericht aus dem Parkingpay-Konto
-(`…/monthly-report/JJJJ/M?key=…`) unter *Einstellungen → Fahrzeuge* einfügen. Abgeschlossene Monate werden einmal
-geholt, in Paperless abgelegt und danach automatisch eingelesen. Der Link enthält einen persönlichen Schlüssel; die
-App gibt ihn nie an den Browser zurück.
 
 **km-Quelle:** Standard ist der Traccar-Bericht. Liefert ein Gerät einen falschen oder eingefrorenen
 Kilometerzähler, kann pro Fahrzeug „km: aus GPS berechnen“ gewählt werden – die App rechnet die Strecke
@@ -342,6 +343,7 @@ app/main.py          FastAPI-Backend: Proxy zur Paperless-/Traccar-API, SQLite, 
 app/bank.py          Kontoauszug-Leser und Abgleich-Logik
 app/vehicles.py      Tankkarten-Rechnungen lesen, Fahrzeug-Kennzahlen
 app/parking.py       Parkingpay-Auszüge lesen (Parkvorgänge mit Kennzeichen)
+app/payslip.py       Lohnabrechnungen lesen (Brutto, Abzüge, Netto, Auszahlung)
 app/purpose.py       Zweck aus dem Rechnungstext lesen
 app/realestate.py    Nebenkosten berechnen, Abrechnung als Word erzeugen
 app/re_api.py        API für Liegenschaften, Mieten, Projekte und Zuordnungen

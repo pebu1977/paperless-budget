@@ -244,8 +244,9 @@ async def plan(month: str):
         in_month = []
     orders_sum = round(sum(o["amount"] or 0 for o in in_month), 2)
     income = s["total_income"]
+    income_expected = round(sum(i["amount"] for i in s["incomes"] if i.get("source") == "erwartet"), 2)
     free = round(income - s["total_spent"] - due_open - orders_sum, 2)
-    return {"month": month, "income": income, "spent": s["total_spent"], "due_open": due_open, "orders": orders_sum,
+    return {"month": month, "income": income, "income_expected": income_expected, "spent": s["total_spent"], "due_open": due_open, "orders": orders_sum,
             "free": free, "recurring": recurring, "orders_in_month": [o["id"] for o in in_month], "open_orders": orders,
             "recent_done": recent_done, "order_tag": _order_name(), "order_tag_found": bool(await order_tag_id()),
             "past": end <= today}

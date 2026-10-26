@@ -24,7 +24,7 @@ async function renderPlan() {
   $("#planBody").innerHTML = `
     <div class="pl-grid">
       <div class="pl-calc">
-        ${line("Einnahmen", fmt(d.income), "", d.income ? "" : `– unter <a href="#" data-goto="income">Einnahmen</a> den Lohn erfassen`)}
+        ${line("Einnahmen", fmt(d.income), "", !d.income ? `– unter <a href="#" data-goto="income">Einnahmen</a> den Lohn erfassen` : d.income_expected ? `davon ${fmt(d.income_expected)} erwartet` : "")}
         ${line("− bereits ausgegeben", fmt(d.spent))}
         ${line("− noch fällig", fmt(d.due_open), "", `${rec.filter((r) => r.status === "offen").length} Vertragszahlung(en)`)}
         ${line("− vorgemerkt", fmt(d.orders), "", `${d.orders_in_month.length} Bestellung(en)`)}

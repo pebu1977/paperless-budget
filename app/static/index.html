@@ -303,7 +303,27 @@
         </div>
       </div>
       <div class="card">
-        <h3>Alle Einnahmen</h3>
+        <div class="cardhead"><h3>Lohnabrechnungen</h3><div class="row"><select id="psYear"></select><button id="psParseNew">Neue einlesen</button></div></div>
+        <p class="muted small">Lohnabrechnungen aus Paperless (Titel mit „Lohnabrechnung“, oder Dokumenttyp/Tag unter Einstellungen → Vormerkungen &amp; Lohn).
+          Der ausbezahlte Betrag wird mit der Gutschrift auf dem Konto abgeglichen; fehlt die Gutschrift noch, zählt der Betrag aus der Abrechnung.</p>
+        <div id="psTotals" class="ps-totals"></div>
+        <div class="tablewrap"><table class="etable" id="psTable"><thead><tr><th style="width:80px">Monat</th><th>Person · Arbeitgeber</th>
+          <th class="num">Brutto</th><th class="num">Abzüge</th><th class="num">Netto</th><th class="num">ausbezahlt</th><th style="width:120px">Konto</th></tr></thead>
+          <tbody id="psBody"></tbody></table></div>
+      </div>
+      <div class="card">
+        <div class="cardhead"><h3>Automatisch aus Kontoauszügen</h3><button id="irAdd">+ Regel</button></div>
+        <p class="muted small">Gutschriften mit diesem Stichwort (z.B. Name des Arbeitgebers) zählen als Einnahme. Solange sie im laufenden Monat
+          noch fehlt, rechnet die App mit dem <b>erwarteten Betrag</b> – so stimmt „Rest vom Lohn“ auch vor dem Zahltag.
+          Den Lohn dann <b>nicht zusätzlich</b> unten als wiederkehrende Einnahme erfassen.</p>
+        <div class="tablewrap"><table class="etable" id="irTable"><thead><tr><th>Stichwort in der Gutschrift</th><th style="width:160px">Bezeichnung</th>
+          <th class="num" style="width:130px">erwartet CHF</th><th class="num" style="width:100px">Zahltag</th><th style="width:70px">aktiv</th><th style="width:70px"></th></tr></thead>
+          <tbody id="irBody"></tbody></table></div>
+        <h4 style="margin-top:16px">Gutschriften im gewählten Monat</h4>
+        <div id="irCredits"></div>
+      </div>
+      <div class="card">
+        <h3>Von Hand erfasste Einnahmen</h3>
         <div class="tablewrap">
           <table class="table">
             <thead><tr><th>Beschreibung</th><th>Datum</th><th>Art</th><th class="num">Betrag</th><th></th></tr></thead>
@@ -391,6 +411,12 @@
               <div class="field"><div class="lbl"><b>Rechnung erwartet nach</b><span>Tage nach der Bestellung</span></div><div><input id="setExpectDays" type="number" min="1" max="120" style="width:90px"> Tage</div></div>
             </div>
             <div class="card">
+              <h3>Lohnabrechnungen erkennen</h3>
+              <p class="muted small">Dokumente mit „Lohnabrechnung“ im Titel werden immer erkannt. Zusätzlich:</p>
+              <div class="field"><div class="lbl"><b>Dokumenttypen</b></div><div id="psTypes" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>oder Tags</b></div><div id="psTags" class="chips"></div></div>
+            </div>
+            <div class="card">
               <h3>Lohn</h3>
               <p class="muted small">„Rest vom Lohn“ rechnet mit den Einnahmen des Monats. Den Lohn als wiederkehrende Einnahme unter <a href="#" data-goto="income">Einnahmen</a> erfassen.</p>
             </div>
@@ -411,13 +437,8 @@
               <h3>Parkingpay-Auszüge erkennen</h3>
               <p class="muted small">Die Parkvorgänge werden über das <b>Kennzeichen</b> dem Fahrzeug zugeordnet und zählen zu dessen Kosten.
                 Im Budget zählt weiterhin die Zahlung an Parkingpay (Aufladung bzw. Rechnung) – darum die Aufladungen <b>keinem Fahrzeug</b> zuordnen.</p>
-              <div class="field"><div class="lbl"><b>Korrespondent</b><span>z.B. Digitalparking / Parkingpay</span></div><div id="parkCorr" class="chips"></div></div>
+              <div class="field"><div class="lbl"><b>Korrespondent</b><span>z.B. Digitalparking AG – die Monatsberichte aus dem Parkingpay-Konto in Paperless ablegen</span></div><div id="parkCorr" class="chips"></div></div>
               <div class="field"><div class="lbl"><b>oder Tag</b></div><div id="parkTags" class="chips"></div></div>
-              <div class="field"><div class="lbl"><b>Monatsbericht automatisch holen</b><span>optional: Link zum Monatsbericht aus dem Parkingpay-Konto (…/monthly-report/JJJJ/M?key=…). Enthält einen persönlichen Schlüssel – wie ein Passwort behandeln.</span></div>
-                <div><input id="setPpUrl" type="password" autocomplete="off" placeholder="https://parkingpay.ch/ui-api/customer-account/monthly-report/…" style="width:100%"></div></div>
-              <div class="field"><div class="lbl"><b>Holen ab Monat</b><span>abgeschlossene Monate werden einmal geholt und in Paperless abgelegt</span></div>
-                <div class="row"><input id="setPpStart" type="month"><button id="setPpFetch">jetzt holen</button><button id="setPpClear" class="linkbtn danger" hidden>Link entfernen</button></div></div>
-              <div id="setPpInfo" class="muted small"></div>
             </div>
           </div>
 

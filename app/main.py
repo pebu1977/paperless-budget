@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import bank, parking as pk, purpose as purp, vehicles as veh
+from . import bank, parking as pk, payslip as pay, purpose as purp, vehicles as veh
 
 # ---------------------------------------------------------------- Konfiguration
 PAPERLESS_URL = os.environ.get("PAPERLESS_URL", "http://paperless:8000").rstrip("/")
@@ -61,10 +61,8 @@ DEFAULT_SETTINGS = {
     "fuel_tag_ids": [],                 # ... oder Tags
     "parking_correspondent_ids": [],    # Parkingpay-Auszüge erkennen: Korrespondenten
     "parking_tag_ids": [],              # ... oder Tags
-    "parkingpay_report_url": "",        # Link zum Monatsbericht (enthält einen persönlichen Schlüssel – wird nie ausgeliefert)
-    "parkingpay_fetched": [],           # bereits geholte Monate "JJJJ-MM"
-    "parkingpay_last_try": None,
-    "parkingpay_start": None,           # ab diesem Monat holen (Standard: 3 Monate zurück)
+    "payslip_document_type_ids": [],    # Lohnabrechnungen erkennen (zusätzlich: Titel enthält "Lohnabrechnung")
+    "payslip_tag_ids": [],
     "exclude_tag_ids": [],              # Dokumente mit diesen Tags nie im Budget (z.B. "Geschäft")
     # Namen in Paperless (Startwert aus der .env, in der App änderbar)
     "amount_field_name": AMOUNT_FIELD_NAME,
@@ -170,6 +168,18 @@ def init_db():
                 unit TEXT NOT NULL DEFAULT 'L',
                 amount REAL NOT NULL,
                 vehicle_id INTEGER                       -- fest zugeordnet (manuell); sonst über die Karte
+            );
+            CREATE TABLE IF NOT EXISTS payslips (
+                doc_id INTEGER PRIMARY KEY, title TEXT, date TEXT, employer TEXT, person TEXT, month TEXT,
+                gross REAL, net REAL, payout REAL, child_allowance REAL, deductions TEXT, ok INTEGER NOT NULL DEFAULT 0, parsed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS income_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL,                   -- Stichworte in der Gutschrift (Komma = oder, + = und)
+                label TEXT NOT NULL DEFAULT 'Lohn',
+                expected REAL,                           -- erwarteter Betrag, solange die Gutschrift im Monat fehlt
+                day INTEGER,                             -- üblicher Zahltag
+                active INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS parking_docs (doc_id INTEGER PRIMARY KEY, title TEXT, parsed_at TEXT, entries INTEGER);
             CREATE TABLE IF NOT EXISTS parking_entries (
@@ -292,6 +302,8 @@ def migrate_db():
 
 
 migrate_db()
+with db() as _c:   # früherer Parkingpay-Link-Abruf: gespeicherten Link (enthält einen Schlüssel) entfernen
+    _c.execute("DELETE FROM settings WHERE key LIKE 'parkingpay_%'")
 
 
 def get_settings() -> dict:
@@ -428,7 +440,18 @@ def get_flags() -> dict[int, dict]:
         return {r["doc_id"]: dict(r) for r in con.execute("SELECT * FROM doc_flags WHERE excluded = 1")}
 
 
-def exclusion(doc_id: int, tags: list[int], flags: dict, settings: dict, tag_names: dict) -> tuple[bool, Optional[str], str]:
+_payslip_cache: dict = {"t": 0.0, "ids": set()}
+
+
+def payslip_ids() -> set:
+    if time.time() - _payslip_cache["t"] > 30:
+        with db() as con:
+            _payslip_cache.update(t=time.time(), ids={r[0] for r in con.execute("SELECT doc_id FROM payslips")})
+    return _payslip_cache["ids"]
+
+
+def exclusion(doc_id: int, tags: list[int], flags: dict, settings: dict, tag_names: dict,
+              doc_type: Optional[int] = None) -> tuple[bool, Optional[str], str]:
     """(ausgeschlossen?, Grund, Quelle 'manuell'|'tag'|'')"""
     f = flags.get(doc_id)
     if f:
@@ -437,6 +460,9 @@ def exclusion(doc_id: int, tags: list[int], flags: dict, settings: dict, tag_nam
     if hit is not None:
         return True, tag_names.get(hit, "Tag"), "tag"
     # Bestellbestätigungen sind nur vorgemerkt – gezählt wird später die Rechnung bzw. Abbuchung
+    if (doc_type and doc_type in (settings.get("payslip_document_type_ids") or [])) or \
+            set(tags) & set(settings.get("payslip_tag_ids") or []) or doc_id in payslip_ids():
+        return True, "Lohnabrechnung (Einnahme)", "tag"
     oname = (settings.get("order_tag_name") or "").strip().lower()
     order = next((t for t in tags if oname and tag_names.get(t, "").strip().lower() == oname), None)
     if order is not None:
@@ -536,7 +562,7 @@ async def _excl_ctx() -> tuple[dict, dict, dict]:
 
 def normalize_all(docs: list[dict], fid: int, cats: list[int], ctx: tuple) -> list[dict]:
     flags, st, names = ctx
-    return [normalize(d, fid, cats, exclusion(d["id"], d.get("tags") or [], flags, st, names)) for d in docs]
+    return [normalize(d, fid, cats, exclusion(d["id"], d.get("tags") or [], flags, st, names, d.get("document_type"))) for d in docs]
 
 
 def alloc_targets() -> dict:
@@ -627,8 +653,137 @@ async def fetch_expenses(start: date, end: date, include_excluded: bool = False,
     return [d for d in out if include_excluded or not d["excluded"]]
 
 
+def _kw(match_text: str, hay: str) -> bool:
+    hay = hay.lower()
+    for kw in (match_text or "").split(","):
+        terms = [t.strip().lower() for t in kw.split("+") if t.strip()]
+        if terms and all(t in hay for t in terms):
+            return True
+    return False
+
+
+def income_rule_for(t: dict, rules: list[dict]) -> Optional[dict]:
+    hay = f"{t.get('merchant') or ''} {t.get('text') or ''}"
+    return next((r for r in rules if _kw(r["keyword"], hay)), None)
+
+
+def _payslips_ok() -> list[dict]:
+    with db() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM payslips WHERE ok = 1 AND payout IS NOT NULL ORDER BY date")]
+
+
+def match_payslips(payslips: list[dict], credits: list[dict]) -> dict[int, dict]:
+    """Lohnabrechnung ↔ Gutschrift: gleicher Betrag (±5 Rp.), Gutschrift 10 Tage vor bis 25 Tage nach dem Abrechnungsdatum."""
+    out: dict[int, dict] = {}
+    used: set = set()
+    for ps in sorted(payslips, key=lambda x: x["date"] or ""):
+        if not ps["date"]:
+            continue
+        d0 = date.fromisoformat(ps["date"])
+        best = None
+        for t in credits:
+            if t["id"] in used or abs(t["amount"] - ps["payout"]) > 0.05:
+                continue
+            dd = (date.fromisoformat(t["date"]) - d0).days
+            if -10 <= dd <= 25 and (best is None or abs(dd) < best[0]):
+                best = (abs(dd), t)
+        if best:
+            out[ps["doc_id"]] = best[1]
+            used.add(best[1]["id"])
+    return out
+
+
+def _ps_label(ps: dict) -> str:
+    who = (ps.get("person") or "").split()
+    # "Peter Muster" -> Peter, "Muster Petra" (Nachname zuerst) -> Petra: das kürzere/letzte Wort ist selten eindeutig,
+    # deshalb ganzer Name, wenn kurz genug
+    name = ps.get("person") or ""
+    return f"Lohn {name}" if name and len(name) <= 24 else ("Lohn " + (who[0] if who else (ps.get("employer") or "")))
+
+
+def bank_incomes(start: date, end: date) -> list[dict]:
+    """Einnahmen aus Lohnabrechnungen und Gutschriften:
+    1. Lohnabrechnung mit passender Gutschrift -> die Gutschrift zählt (Quelle Bank)
+    2. Lohnabrechnung ohne Gutschrift (Auszug noch nicht eingelesen) -> der ausbezahlte Betrag zählt
+    3. übrige Gutschriften, die zu einer Einnahmen-Regel passen
+    4. im laufenden/künftigen Monat ohne Eingang: erwarteter Betrag (Regel, sonst letzte Lohnabrechnung des Arbeitgebers)"""
+    with db() as con:
+        rules = [dict(r) for r in con.execute("SELECT * FROM income_rules WHERE active = 1 ORDER BY id")]
+        credits = [dict(r) for r in con.execute(
+            "SELECT id, date, amount, merchant, text FROM transactions WHERE amount > 0 AND status != 'ignored' AND date >= ? AND date < ?",
+            ((start - timedelta(days=45)).isoformat(), (end + timedelta(days=45)).isoformat()))]
+    payslips = _payslips_ok()
+    if not rules and not payslips:
+        return []
+    pairs = match_payslips(payslips, credits)
+    matched_tx = {t["id"] for t in pairs.values()}
+    s, e = start.isoformat(), end.isoformat()
+    out: list[dict] = []
+    for ps in payslips:
+        t = pairs.get(ps["doc_id"])
+        if t and s <= t["date"] < e:
+            out.append({"id": f"tx{t['id']}", "tx_id": t["id"], "description": _ps_label(ps), "amount": t["amount"], "date": t["date"],
+                        "source": "bank", "payslip_id": ps["doc_id"], "employer": ps["employer"], "recurring": 0,
+                        "detail": f"{ps['employer'] or ''} · Lohnabrechnung {ps['month'] or ''}"})
+        elif not t and ps["date"] and s <= ps["date"] < e:
+            out.append({"id": f"ps{ps['doc_id']}", "description": _ps_label(ps), "amount": ps["payout"], "date": ps["date"],
+                        "source": "Lohnabrechnung", "payslip_id": ps["doc_id"], "employer": ps["employer"], "recurring": 0,
+                        "detail": f"{ps['employer'] or ''} · noch keine Gutschrift gefunden"})
+    for t in credits:
+        if t["id"] in matched_tx or not (s <= t["date"] < e):
+            continue
+        r = income_rule_for(t, rules)
+        if r:
+            out.append({"id": f"tx{t['id']}", "tx_id": t["id"], "description": r["label"], "amount": t["amount"], "date": t["date"],
+                        "source": "bank", "rule_id": r["id"], "recurring": 0, "detail": t["merchant"] or t["text"][:60]})
+
+    def ps_text(ps):
+        t = pairs.get(ps["doc_id"])
+        return f"{ps['employer'] or ''} {ps['person'] or ''} {ps['title'] or ''} {(t or {}).get('merchant') or ''} {(t or {}).get('text') or ''}"
+
+    def linked(ps, r):
+        return _kw(r["keyword"], ps_text(ps))
+
+    this_month = date.today().replace(day=1)
+    m = date(start.year, start.month, 1)
+    while m < end:
+        if m >= this_month:
+            mk = m.strftime("%Y-%m")
+            in_month = [x for x in out if x["date"][:7] == mk]
+            covered_employers = {x.get("employer") for x in in_month if x.get("employer")}
+            for r in rules:
+                lp = [ps for ps in payslips if linked(ps, r)]
+                exp = r["expected"] if r["expected"] else (lp[-1]["payout"] if lp else None)
+                has = any(x.get("rule_id") == r["id"] for x in in_month) or any(
+                    x.get("payslip_id") and any(ps["doc_id"] == x["payslip_id"] for ps in lp) for x in in_month)
+                if exp and not has:
+                    day = int(r["day"] or (int(lp[-1]["date"][8:10]) if lp else 25))
+                    out.append({"id": f"exp{r['id']}-{m:%Y%m}", "description": r["label"], "amount": exp,
+                                "date": date(m.year, m.month, min(day, 28)).isoformat(), "source": "erwartet", "rule_id": r["id"],
+                                "recurring": 0})
+                for ps in lp:
+                    covered_employers.add(ps["employer"])
+            # Arbeitgeber mit Lohnabrechnungen, aber ohne Regel: letzte Abrechnung als Erwartung (wenn nicht älter als 2 Monate)
+            last_by_emp: dict = {}
+            for ps in payslips:
+                last_by_emp[ps["employer"] or ps["person"]] = ps
+            for emp, ps in last_by_emp.items():
+                if emp in covered_employers or any(linked(ps, r) for r in rules) or not ps["month"]:
+                    continue
+                if ps["month"] < shift_month(this_month, -2).strftime("%Y-%m"):
+                    continue
+                if ps["month"] >= mk:
+                    continue
+                out.append({"id": f"expps{ps['doc_id']}-{m:%Y%m}", "description": _ps_label(ps), "amount": ps["payout"],
+                            "date": date(m.year, m.month, min(int((ps["date"] or "2000-01-25")[8:10]), 28)).isoformat(),
+                            "source": "erwartet", "employer": ps["employer"], "recurring": 0,
+                            "detail": f"wie letzte Lohnabrechnung {ps['month']}"})
+        m = shift_month(m, 1)
+    return out
+
+
 def incomes_between(start: date, end: date) -> list[dict]:
-    """Einmalige Einnahmen im Zeitraum + wiederkehrende, die im Zeitraum aktiv sind."""
+    """Einmalige Einnahmen im Zeitraum + wiederkehrende, die im Zeitraum aktiv sind + erkannte Gutschriften (Lohn …)."""
     s, e = start.isoformat(), end.isoformat()
     with db() as con:
         rows = [dict(r) for r in con.execute("SELECT * FROM incomes ORDER BY date DESC")]
@@ -636,10 +791,186 @@ def incomes_between(start: date, end: date) -> list[dict]:
     for r in rows:
         if r["recurring"]:
             if r["date"] < e and (not r["end_date"] or r["end_date"] >= s):
-                out.append(r)
+                out.append({**r, "source": "manuell"})
         elif s <= r["date"] < e:
-            out.append(r)
-    return out
+            out.append({**r, "source": "manuell"})
+    return out + bank_incomes(start, end)
+
+
+# ---------------------------------------------------------------- Lohnabrechnungen
+async def payslip_docs_found() -> list[dict]:
+    st = get_settings()
+    base = {"fields": "id,title,created,correspondent,document_type,tags", "ordering": "-created"}
+    found: dict[int, dict] = {}
+    queries = [{"title__icontains": "lohnabrechnung"}]   # Titel genügt
+    if st.get("payslip_document_type_ids"):
+        queries.append({"document_type__id__in": ",".join(map(str, st["payslip_document_type_ids"]))})
+    if st.get("payslip_tag_ids"):
+        queries.append({"tags__id__in": ",".join(map(str, st["payslip_tag_ids"]))})
+    for q in queries:
+        try:
+            for d in await pl_all("/api/documents/", {**base, **q}):
+                found[d["id"]] = d
+        except HTTPException:
+            pass
+    return list(found.values())
+
+
+@app.get("/api/payslip-docs")
+async def payslip_docs():
+    docs = await payslip_docs_found()
+    with db() as con:
+        parsed = {r["doc_id"]: dict(r) for r in con.execute("SELECT doc_id, parsed_at, ok FROM payslips")}
+    return sorted([{"id": d["id"], "title": d.get("title"), "date": str(d.get("created") or "")[:10],
+                    "url": f"{PAPERLESS_PUBLIC_URL}/documents/{d['id']}/details",
+                    "parsed_at": parsed.get(d["id"], {}).get("parsed_at"), "ok": parsed.get(d["id"], {}).get("ok")} for d in docs],
+                  key=lambda x: x["date"], reverse=True)
+
+
+async def parse_payslip_one(doc_id: int) -> dict:
+    doc = await pl_request("GET", f"/api/documents/{doc_id}/")
+    ps = pay.parse_payslip(doc.get("content") or "")
+    if not ps.ok:
+        alt = pay.parse_payslip(await pdf_layout_text(doc_id))
+        if alt.ok:
+            ps = alt
+    meta = await get_meta()
+    corr = {c["id"]: c["name"] for c in meta["correspondents"]}
+    created = str(doc.get("created") or "")[:10]
+    employer = corr.get(doc.get("correspondent")) or next((l.strip() for l in (doc.get("content") or "").splitlines() if l.strip()), None)
+    month = ps.month or (created[:7] if created else None)
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO payslips(doc_id, title, date, employer, person, month, gross, net, payout, child_allowance, "
+                    "deductions, ok, parsed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (doc_id, doc.get("title"), created, employer, ps.person, month, ps.gross, ps.net, ps.payout, ps.child_allowance,
+                     json.dumps(ps.deductions, ensure_ascii=False), int(ps.ok), datetime.now().isoformat(timespec="seconds")))
+    _payslip_cache["t"] = 0
+    return {"doc_id": doc_id, "title": doc.get("title"), "ok": ps.ok, "month": month, "person": ps.person, "payout": ps.payout}
+
+
+@app.post("/api/payslips/{doc_id}/parse")
+async def parse_payslip_doc(doc_id: int):
+    return await parse_payslip_one(doc_id)
+
+
+@app.post("/api/payslips/parse-new")
+async def parse_new_payslips():
+    results = [await parse_payslip_one(d["id"]) for d in await payslip_docs() if not d["parsed_at"]]
+    return {"parsed": len(results), "ok": sum(1 for r in results if r["ok"]), "results": results}
+
+
+class PayslipEdit(BaseModel):
+    person: Optional[str] = None
+    month: Optional[str] = None
+    gross: Optional[float] = None
+    net: Optional[float] = None
+    payout: Optional[float] = None
+
+
+@app.put("/api/payslips/{doc_id}")
+def edit_payslip(doc_id: int, body: PayslipEdit):
+    data = body.model_dump(exclude_unset=True)
+    if data:
+        with db() as con:
+            con.execute(f"UPDATE payslips SET {', '.join(k + ' = ?' for k in data)} WHERE doc_id = ?", [*data.values(), doc_id])
+            r = con.execute("SELECT gross, payout FROM payslips WHERE doc_id = ?", (doc_id,)).fetchone()
+            if r:
+                con.execute("UPDATE payslips SET ok = ? WHERE doc_id = ?", (int(bool(r["gross"] and r["payout"])), doc_id))
+    return {"ok": True}
+
+
+@app.get("/api/payslips")
+def list_payslips(year: int):
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM payslips WHERE month LIKE ? OR (month IS NULL AND date LIKE ?) ORDER BY month DESC, person",
+                                             (f"{year}-%", f"{year}-%"))]
+        credits = [dict(r) for r in con.execute(
+            "SELECT id, date, amount, merchant, text FROM transactions WHERE amount > 0 AND date >= ? AND date < ?",
+            (f"{year - 1}-12-01", f"{year + 1}-02-01"))]
+    pairs = match_payslips([r for r in rows if r["ok"] and r["payout"]], credits)
+    kinds = ("ahv", "alv", "bvg", "insurance", "tax", "other")
+    persons: dict = {}
+    for r in rows:
+        r["deductions"] = json.loads(r["deductions"] or "[]")
+        r["deductions_total"] = round(sum(d["amount"] for d in r["deductions"]), 2)
+        t = pairs.get(r["doc_id"])
+        r["bank"] = {"id": t["id"], "date": t["date"]} if t else None
+        r["url"] = f"{PAPERLESS_PUBLIC_URL}/documents/{r['doc_id']}/details"
+        if not r["ok"]:
+            continue
+        key = r["person"] or r["employer"] or "?"
+        p = persons.setdefault(key, {"person": key, "employers": set(), "count": 0, "gross": 0.0, "net": 0.0, "payout": 0.0,
+                                     "child_allowance": 0.0, **{k: 0.0 for k in kinds}})
+        p["employers"].add(r["employer"] or "")
+        p["count"] += 1
+        for f in ("gross", "net", "payout", "child_allowance"):
+            p[f] += r[f] or 0
+        for d in r["deductions"]:
+            p[d["kind"] if d["kind"] in kinds else "other"] += d["amount"]
+    totals = []
+    for p in persons.values():
+        p["employers"] = sorted(x for x in p["employers"] if x)
+        for k, v in list(p.items()):
+            if isinstance(v, float):
+                p[k] = round(v, 2)
+        totals.append(p)
+    return {"year": year, "payslips": rows, "totals": totals}
+
+
+class IncomeRuleIn(BaseModel):
+    keyword: str
+    label: str = "Lohn"
+    expected: Optional[float] = None
+    day: Optional[int] = None
+    active: bool = True
+
+
+@app.get("/api/income-rules")
+def income_rules():
+    with db() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM income_rules ORDER BY id")]
+
+
+@app.post("/api/income-rules", status_code=201)
+def add_income_rule(body: IncomeRuleIn):
+    if not body.keyword.strip():
+        raise HTTPException(400, "Stichwort angeben")
+    with db() as con:
+        cur = con.execute("INSERT INTO income_rules(keyword, label, expected, day, active) VALUES (?, ?, ?, ?, ?)",
+                          (body.keyword.strip(), body.label.strip() or "Lohn", body.expected, body.day, int(body.active)))
+        return dict(con.execute("SELECT * FROM income_rules WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
+@app.put("/api/income-rules/{rid}")
+def update_income_rule(rid: int, body: IncomeRuleIn):
+    with db() as con:
+        con.execute("UPDATE income_rules SET keyword=?, label=?, expected=?, day=?, active=? WHERE id=?",
+                    (body.keyword.strip(), body.label.strip() or "Lohn", body.expected, body.day, int(body.active), rid))
+    return {"ok": True}
+
+
+@app.delete("/api/income-rules/{rid}", status_code=204)
+def delete_income_rule(rid: int):
+    with db() as con:
+        con.execute("DELETE FROM income_rules WHERE id = ?", (rid,))
+    return Response(status_code=204)
+
+
+@app.get("/api/income-credits")
+def income_credits(month: str):
+    """Alle Gutschriften des Monats – mit der Regel, die sie als Einnahme erkennt (oder keiner)."""
+    start, end = month_range(month)
+    with db() as con:
+        rules = [dict(r) for r in con.execute("SELECT * FROM income_rules WHERE active = 1")]
+        rent = {r[0] for r in con.execute("SELECT tx_id FROM rent_payments WHERE tenancy_id != 0")}
+        txs = [dict(r) for r in con.execute(
+            "SELECT id, date, amount, merchant, text, status FROM transactions WHERE amount > 0 AND date >= ? AND date < ? ORDER BY date",
+            (start.isoformat(), end.isoformat()))]
+    for t in txs:
+        r = income_rule_for(t, rules)
+        t["rule"] = r["label"] if r else None
+        t["rent"] = t["id"] in rent
+    return txs
 
 
 def bank_expenses(start: date, end: date, categories: list[int]) -> list[dict]:
@@ -702,8 +1033,8 @@ class SettingsIn(BaseModel):
     fuel_tag_ids: Optional[list[int]] = None
     parking_correspondent_ids: Optional[list[int]] = None
     parking_tag_ids: Optional[list[int]] = None
-    parkingpay_report_url: Optional[str] = None
-    parkingpay_start: Optional[str] = None
+    payslip_document_type_ids: Optional[list[int]] = None
+    payslip_tag_ids: Optional[list[int]] = None
     exclude_tag_ids: Optional[list[int]] = None
     amount_field_name: Optional[str] = None
     paid_tag_name: Optional[str] = None
@@ -718,25 +1049,17 @@ class SettingsIn(BaseModel):
     loan_categories: Optional[list[str]] = None
 
 
-SECRET_KEYS = {"parkingpay_report_url"}
-
-
 @app.get("/api/settings")
 def read_settings():
-    st = get_settings()
-    for k in SECRET_KEYS:          # Schlüssel nie an den Browser geben
-        st[k] = "gespeichert" if st.get(k) else ""
-    return st
+    return get_settings()
 
 
 @app.put("/api/settings")
 def write_settings(body: SettingsIn):
     with db() as con:
         for k, v in body.model_dump(exclude_unset=True).items():
-            if v is None or (k in SECRET_KEYS and v == "gespeichert"):
+            if v is None:
                 continue
-            if k == "parkingpay_report_url" and v and not re.search(r"/monthly-report/\d{4}/\d{1,2}", v):
-                raise HTTPException(400, "Das ist kein Parkingpay-Monatsbericht-Link (…/monthly-report/JJJJ/M?key=…).")
             con.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (k, json.dumps(v)))
     if NAME_KEYS & set(body.model_dump(exclude_unset=True)):
         _meta_cache.update(t=0, data=None)     # Tag-/Feldnamen geändert -> neu zuordnen
@@ -1203,12 +1526,16 @@ async def _transactions(month: str) -> list[dict]:
         from .contracts_api import auto_assign_contracts, contract_labels
         auto_assign_contracts(con)
         contract = contract_labels(con)
+        irules = [dict(r) for r in con.execute("SELECT * FROM income_rules WHERE active = 1")]
     for t in rows:
         t["abs_amount"] = -t["amount"] if t["amount"] < 0 else t["amount"]
     attach_allocations(rows, "tx", amount_key="abs_amount")
     for t in rows:
         t["rent"] = rent.get(t["id"])
         t["contract"] = contract.get(t["id"])
+        if t["amount"] > 0:
+            ir = income_rule_for(t, irules)
+            t["income"] = ir["label"] if ir else None
         t["candidates"], t["unique"] = [], False
         if t["status"] == "open" and t["amount"] < 0:
             c = bank.candidates(t, free, corr, window, MATCH_BEFORE_DAYS)[:5]
@@ -1838,66 +2165,6 @@ async def parse_parking_one(doc_id: int) -> dict:
         x["count"] += 1
         x["amount"] = round(x["amount"] + e.amount, 2)
     return {"doc_id": doc_id, "title": doc.get("title"), "found": len(entries), "added": added, "plates": list(plates.values())}
-
-
-def _set(key: str, value) -> None:
-    with db() as con:
-        con.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, json.dumps(value)))
-
-
-@app.post("/api/parking/fetch")
-async def parking_fetch(auto: bool = False):
-    """Parkingpay-Monatsberichte (abgeschlossene Monate) über den hinterlegten Link holen und in Paperless ablegen."""
-    st = get_settings()
-    url = st.get("parkingpay_report_url") or ""
-    if not url:
-        if auto:
-            return {"skipped": "kein Link"}
-        raise HTTPException(409, "Kein Parkingpay-Link hinterlegt (Einstellungen → Fahrzeuge).")
-    if auto and st.get("parkingpay_last_try") and time.time() - st["parkingpay_last_try"] < 12 * 3600:
-        return {"skipped": "kürzlich geprüft"}
-    if not st.get("parking_correspondent_ids") and not st.get("parking_tag_ids"):
-        if auto:
-            return {"skipped": "kein Korrespondent/Tag"}
-        raise HTTPException(409, "Zuerst unter „Parkingpay-Auszüge erkennen“ einen Korrespondenten oder Tag wählen.")
-    _set("parkingpay_last_try", time.time())
-    today = date.today()
-    last_full = shift_month(date(today.year, today.month, 1), -1)
-    first = date.fromisoformat(st["parkingpay_start"] + "-01") if st.get("parkingpay_start") else shift_month(last_full, -2)
-    done = set(st.get("parkingpay_fetched") or [])
-    months, m = [], first
-    while m <= last_full:
-        if m.strftime("%Y-%m") not in done:
-            months.append(m)
-        m = shift_month(m, 1)
-    fetched, errors = [], []
-    MON = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as cl:
-        for m in months:
-            u = re.sub(r"/monthly-report/\d{4}/\d{1,2}", f"/monthly-report/{m.year}/{m.month}", url)
-            try:
-                r = await cl.get(u)
-            except httpx.HTTPError as e:
-                errors.append(f"{m:%m.%Y}: Parkingpay nicht erreichbar ({type(e).__name__})")
-                break
-            if r.status_code != 200 or not r.content.startswith(b"%PDF"):
-                errors.append(f"{m:%m.%Y}: kein PDF erhalten (HTTP {r.status_code}) – Link abgelaufen? Neuen Link aus dem Parkingpay-Konto einfügen.")
-                break
-            data = {"title": f"Parkingpay Kontoauszug {MON[m.month - 1]} {m.year}", "created": shift_month(m, 1).isoformat()}
-            if st.get("parking_correspondent_ids"):
-                data["correspondent"] = str(st["parking_correspondent_ids"][0])
-            if st.get("parking_tag_ids"):
-                data["tags"] = [str(t) for t in st["parking_tag_ids"]]
-            up = await client().post("/api/documents/post_document/", data=data,
-                                     files={"document": (f"parkingpay-{m:%Y-%m}.pdf", r.content, "application/pdf")})
-            if up.status_code >= 400:
-                errors.append(f"{m:%m.%Y}: Upload zu Paperless fehlgeschlagen ({up.status_code})")
-                break
-            done.add(m.strftime("%Y-%m"))
-            fetched.append(m.strftime("%Y-%m"))
-    _set("parkingpay_fetched", sorted(done))
-    return {"fetched": fetched, "errors": errors,
-            "hint": "Paperless verarbeitet die Dokumente im Hintergrund – danach unter Fahrzeuge „Neue einlesen“." if fetched else None}
 
 
 @app.post("/api/parking-docs/{doc_id}/parse")
