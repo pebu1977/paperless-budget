@@ -301,13 +301,23 @@ async function reStatement(p) {
       <div id="stResult" style="margin-top:10px"></div>
       <h4 style="margin-top:18px">Bisherige Abrechnungen</h4>
       ${hist.length ? hist.map((x) => `<div class="invitem"><span>${fmtDate(x.created_at.slice(0, 10))} · ${x.interim ? "Zwischenabr. " : ""}${fmtDate(x.period_start)}–${fmtDate(x.period_end)}
-        ${x.docx ? `<a href="/api/files/${encodeURIComponent(x.docx)}">Word</a>` : ""} ${x.pdf ? `· <a href="/api/files/${encodeURIComponent(x.pdf)}" target="_blank">PDF</a>` : ""}</span><b class="num">${fmt(x.saldo)}</b></div>`).join("") : `<div class="muted small">Noch keine.</div>`}
+        ${x.docx ? `<a href="/api/files/${encodeURIComponent(x.docx)}">Word</a>` : ""} ${x.pdf ? `· <a href="/api/files/${encodeURIComponent(x.pdf)}" target="_blank">PDF</a>` : ""}</span>
+        <span class="row"><b class="num">${fmt(x.saldo)}</b>${x.deletable ? `<button class="linkbtn danger" data-nkdel="${x.id}" data-pl="${x.paperless_task ? 1 : 0}" title="Nur die letzte Abrechnung kann gelöscht werden">löschen</button>` : ""}</span></div>`).join("") : `<div class="muted small">Noch keine.</div>`}
     </div></div>`;
   const ai = $("#stAkonto");
   if (ai) ai.onchange = () => { RE.akontoOverride = num(ai.value); renderRE(); };
   $("#stMode").onchange = (e) => { RE.stMode = e.target.value; RE.akontoOverride = null; renderRE(); };
   if ($("#stFrom")) { $("#stFrom").onchange = (e) => { RE.stFrom = e.target.value; RE.akontoOverride = null; renderRE(); };
     $("#stTo").onchange = (e) => { RE.stTo = e.target.value; RE.akontoOverride = null; renderRE(); }; }
+  $("#reBody").querySelectorAll("[data-nkdel]").forEach((b) => (b.onclick = async () => {
+    if (!confirm("Die letzte Abrechnung löschen? Word- und PDF-Datei werden entfernt. Danach kann die vorherige gelöscht werden.")) return;
+    const pl = b.dataset.pl === "1" && confirm("Auch das in Paperless abgelegte PDF löschen?\n\nOK = ja, auch in Paperless löschen\nAbbrechen = nur in der App löschen");
+    try {
+      const r = await api(`/api/nk-statements/${b.dataset.nkdel}?paperless=${pl}`, { method: "DELETE" });
+      toast("Abrechnung gelöscht" + (r.paperless ? ` · Paperless: ${r.paperless}` : ""), r.paperless && r.paperless !== "gelöscht");
+      renderRE();
+    } catch (err) { toast(err.message, true); }
+  }));
   $("#stGen").onclick = async (e) => {
     e.target.disabled = true; e.target.textContent = "Erzeuge …";
     try {

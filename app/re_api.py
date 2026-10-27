@@ -613,7 +613,58 @@ async def property_summary(pid: int, year: int):
 @router.get("/api/nk-statements")
 def nk_history(property_id: int):
     with core.db() as con:
-        return [dict(r) for r in con.execute("SELECT * FROM nk_statements WHERE property_id = ? ORDER BY id DESC", (property_id,))]
+        rows = [dict(r) for r in con.execute("SELECT * FROM nk_statements WHERE property_id = ? ORDER BY id DESC", (property_id,))]
+    latest = _latest_ids(rows)
+    for r in rows:
+        r["deletable"] = r["id"] in latest
+    return rows
+
+
+def _latest_ids(rows: list[dict]) -> set:
+    """Pro Mietverhältnis (bzw. Wohnung beim Eigenanteil) nur die zuletzt erzeugte Abrechnung."""
+    best: dict = {}
+    for r in rows:
+        key = ("t", r["tenancy_id"]) if r["tenancy_id"] else ("u", r["unit_id"])
+        if key not in best or r["id"] > best[key]:
+            best[key] = r["id"]
+    return set(best.values())
+
+
+@router.delete("/api/nk-statements/{sid}")
+async def nk_delete(sid: int, paperless: bool = False):
+    """Abrechnung löschen: Eintrag, Word-/PDF-Datei (falls von keiner anderen Abrechnung genutzt) und optional das Paperless-Dokument."""
+    with core.db() as con:
+        r = con.execute("SELECT * FROM nk_statements WHERE id = ?", (sid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Abrechnung nicht gefunden")
+        r = dict(r)
+        same = [dict(x) for x in con.execute("SELECT id, tenancy_id, unit_id FROM nk_statements WHERE property_id = ?", (r["property_id"],))]
+        if sid not in _latest_ids(same):
+            raise HTTPException(409, "Nur die zuletzt erzeugte Abrechnung dieses Mietverhältnisses kann gelöscht werden.")
+        con.execute("DELETE FROM nk_statements WHERE id = ?", (sid,))
+        others = {x for row in con.execute("SELECT docx, pdf FROM nk_statements") for x in row if x}
+    for name in (r["docx"], r["pdf"]):
+        if name and name not in others:
+            (FILES_DIR / name).unlink(missing_ok=True)
+    result = {"ok": True, "paperless": None}
+    if paperless:
+        doc_id = None
+        if r.get("paperless_task"):
+            try:
+                tasks = await core.pl_request("GET", "/api/tasks/", params={"task_id": r["paperless_task"]})
+                tasks = tasks if isinstance(tasks, list) else tasks.get("results", [])
+                doc_id = next((t.get("related_document") for t in tasks if t.get("related_document")), None)
+            except HTTPException:
+                doc_id = None
+        if doc_id:
+            try:
+                await core.pl_request("DELETE", f"/api/documents/{int(doc_id)}/")
+                result["paperless"] = "gelöscht"
+            except HTTPException as e:
+                result["paperless"] = f"nicht gelöscht ({e.detail})"
+        else:
+            result["paperless"] = "Dokument in Paperless nicht gefunden – bitte dort von Hand löschen"
+    return result
 
 
 @router.get("/api/files/{name}")
