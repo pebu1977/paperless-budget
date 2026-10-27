@@ -6,6 +6,7 @@ Zahlungen (Bankbuchungen, automatisch über Stichworte oder manuell zugeordnet) 
 """
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 from typing import Optional
 
@@ -288,6 +289,7 @@ def contracts_overview():
     act = [c for c in items if c["active"] and not c["ended"]]
     con_ = [c for c in act if c["kind"] == "vertrag"]
     loans = [c for c in act if c["kind"] == "kredit"]
+    abos = [c for c in act if c["kind"] == "abo"]
     s = lambda xs, k: round(sum(x.get(k) or 0 for x in xs), 2)
     by_cat: dict[str, float] = {}
     for c in con_:
@@ -297,11 +299,13 @@ def contracts_overview():
         "totals": {"contracts_monthly": s(con_, "monthly"), "contracts_yearly": s(con_, "yearly"),
                    "loans_monthly": s(loans, "monthly"), "loans_yearly": s(loans, "yearly"),
                    "loans_balance": s(loans, "balance"), "loans_interest_year": s(loans, "interest_year"),
+                   "abos_monthly": s(abos, "monthly"), "abos_yearly": s(abos, "yearly"), "abos_count": len(abos),
                    "paid_ytd": s(act, "paid_ytd"), "by_category": by_cat},
         "notices": sorted([{"id": c["id"], "name": c["name"], "notice_by": c["notice_by"], "notice_days": c["notice_days"],
                             "term_end": c["term_end"]} for c in act if c["notice_days"] is not None and 0 <= c["notice_days"] <= (cfg["contract_notice_days"] or 120)],
                           key=lambda x: x["notice_days"]),
         "categories": cfg["contract_categories"], "loan_categories": cfg["loan_categories"], "intervals": list(INTERVAL_MONTHS),
+        "abo_categories": cfg.get("abo_categories") or [],
         "notice_days": cfg["contract_notice_days"], "badge_days": cfg["contract_badge_days"],
     }
 
@@ -427,3 +431,120 @@ def unassign_payment(tx_id: int):
     with core.db() as con:
         con.execute("INSERT OR REPLACE INTO contract_payments(tx_id, contract_id, auto) VALUES (?, 0, 0)", (tx_id,))
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------- Abos: wiederkehrende Zahlungen erkennen
+ABO_HINTS = re.compile(r"netflix|spotify|apple\.com|itunes|google|youtube|disney|amazon prime|prime video|audible|microsoft|office ?365|"
+                       r"adobe|dropbox|icloud|openai|chatgpt|anthropic|claude|github|zattoo|teleboy|blue tv|sky|dazn|deezer|tidal|"
+                       r"nzz|tages-?anzeiger|blick|watson|aargauer zeitung|20 ?minuten|zeitung|abo\b|abonnement|mitgliedschaft|"
+                       r"fitness|migros fitness|basefit|update fitness|clever fit|mobility|publibike|tier\b|lime\b|swisspass|halbtax|ga\b",
+                       re.I)
+_NORM_DROP = re.compile(r"\d{2}\.\d{2}\.\d{2,4}|\b\d[\d.,:/-]*\b|kartenzahlung|einkauf|debit|maestro|mastercard|visa|twint|"
+                        r"lastschrift|e-banking|zahlung|belastung|gutschrift|ch\d{2}[\d ]+|[^a-zäöüéèà& ]", re.I)
+
+
+def _abo_key(t: dict) -> str:
+    base = t.get("merchant") or (t.get("text") or "").split(" · ")[0]
+    words = [w for w in _NORM_DROP.sub(" ", base.lower()).split() if len(w) > 1][:3]
+    return " ".join(words)
+
+
+def _cadence(days: list[int]) -> Optional[str]:
+    if not days:
+        return None
+    med = sorted(days)[len(days) // 2]
+    for name, lo, hi in (("monat", 26, 35), ("quartal", 84, 98), ("halbjahr", 165, 200), ("jahr", 330, 400)):
+        if lo <= med <= hi and all(lo - 6 <= d <= hi + 6 for d in days):
+            return name
+    return None
+
+
+@router.get("/api/abo-suggestions")
+def abo_suggestions():
+    """Belastungen, die regelmässig mit (fast) gleichem Betrag wiederkommen und noch keinem Vertrag/Abo zugeordnet sind."""
+    cfg = core.get_settings()
+    ignored = set(cfg.get("abo_ignore") or [])
+    since = (date.today() - timedelta(days=430)).isoformat()
+    with core.db() as con:
+        assigned = {r[0] for r in con.execute("SELECT tx_id FROM contract_payments WHERE contract_id != 0")}
+        txs = [dict(r) for r in con.execute(
+            "SELECT id, date, amount, merchant, text, matched_title FROM transactions WHERE amount < 0 AND status != 'ignored' AND date >= ? "
+            "ORDER BY date", (since,))]
+        match_texts = [r[0] for r in con.execute("SELECT match_text FROM contracts WHERE match_text IS NOT NULL AND match_text != ''")]
+    groups: dict[str, list] = {}
+    for t in txs:
+        if t["id"] in assigned:
+            continue
+        hay = f"{t['merchant'] or ''} {t['text']}"
+        if any(re_api._kw_match(mt, hay) for mt in match_texts):
+            continue
+        k = _abo_key(t)
+        if k and k not in ignored:
+            groups.setdefault(k, []).append(t)
+    out = []
+    today = date.today()
+    for k, ts in groups.items():
+        # nach Betrag bündeln (±10 %, mind. 1 CHF) – ein Händler kann mehrere Abos haben
+        clusters: list[list] = []
+        for t in ts:
+            a = -t["amount"]
+            for cl in clusters:
+                ref = -cl[0]["amount"]
+                if abs(a - ref) <= max(1.0, ref * 0.10):
+                    cl.append(t)
+                    break
+            else:
+                clusters.append([t])
+        for cl in clusters:
+            dates = [date.fromisoformat(t["date"]) for t in cl]
+            gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
+            cad = _cadence(gaps)
+            hint = bool(ABO_HINTS.search(f"{cl[0]['merchant'] or ''} {cl[0]['text']}"))
+            if not ((cad == "monat" and len(cl) >= 3) or (cad in ("quartal", "halbjahr", "jahr") and len(cl) >= 2) or
+                    (hint and (cad or len(cl) == 1))):
+                continue
+            months = INTERVAL_MONTHS.get(cad or "monat", 1)
+            last = dates[-1]
+            nxt = _add_months(last, months)
+            if (today - last).days > months * 31 + 45:     # seit längerem nicht mehr belastet -> vermutlich gekündigt
+                continue
+            amt = round(-cl[-1]["amount"], 2)
+            out.append({"key": k, "name": (cl[-1]["merchant"] or k).title() if not cl[-1]["merchant"] else cl[-1]["merchant"],
+                        "amount": amt, "interval": cad or "monat", "count": len(cl), "first": cl[0]["date"], "last": cl[-1]["date"],
+                        "next": nxt.isoformat(), "monthly": round(amt / months, 2), "certain": bool(cad), "hint": hint,
+                        "tx_ids": [t["id"] for t in cl], "sample": cl[-1]["text"][:90]})
+    return sorted(out, key=lambda x: (not x["certain"], -x["monthly"]))
+
+
+@router.post("/api/abo-suggestions/accept")
+def accept_abo(body: dict = Body(...)):
+    """Vorschlag als Abo anlegen: Vertrag (kind=abo) mit Version, Stichwort und den bisherigen Zahlungen."""
+    name, amount, interval = body["name"], float(body["amount"]), body.get("interval") or "monat"
+    first = body.get("first") or date.today().isoformat()
+    # Rhythmus an der letzten Zahlung ausrichten (Abbuchungsdatum kann sich verschieben), Beginn = davor liegende Fälligkeit
+    m = INTERVAL_MONTHS.get(interval, 1) or 1
+    if body.get("last"):
+        anchor = date.fromisoformat(body["last"])
+        while anchor > date.fromisoformat(first):
+            anchor = _add_months(anchor, -m)
+        first = anchor.isoformat()
+    with core.db() as con:
+        cur = con.execute("INSERT INTO contracts(kind, name, category, provider, start, match_text, active, notice_months, renew_months) "
+                          "VALUES ('abo', ?, ?, ?, ?, ?, 1, ?, ?)",
+                          (name, body.get("category"), name, first, body.get("keyword") or body.get("key") or name,
+                           body.get("notice_months"), INTERVAL_MONTHS.get(interval, 1) or None))
+        cid = cur.lastrowid
+        con.execute("INSERT INTO contract_versions(contract_id, valid_from, amount, interval) VALUES (?, ?, ?, ?)",
+                    (cid, first, amount, interval))
+        for tx in body.get("tx_ids") or []:
+            con.execute("INSERT OR REPLACE INTO contract_payments(tx_id, contract_id, auto) VALUES (?, ?, 0)", (int(tx), cid))
+    return {"id": cid}
+
+
+@router.post("/api/abo-suggestions/ignore")
+def ignore_abo(body: dict = Body(...)):
+    cfg = core.get_settings()
+    keys = sorted(set(cfg.get("abo_ignore") or []) | {body["key"]})
+    with core.db() as con:
+        con.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('abo_ignore', ?)", (core.json.dumps(keys),))
+    return {"ok": True}

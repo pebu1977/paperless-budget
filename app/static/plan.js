@@ -4,6 +4,8 @@
 const PL = { data: null, editId: null };
 
 async function renderPlan() {
+  if (typeof canSee === "function" && !canSee("income")) { $("#planCard").hidden = true; return; }   // ohne Einnahmen-Recht sinnlos
+  $("#planCard").hidden = false;
   let d;
   try { d = await api(`/api/plan?month=${S.month}`); } catch (e) { $("#planBody").textContent = e.message; return; }
   PL.data = d;

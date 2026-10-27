@@ -4,7 +4,8 @@
 const SET = { panel: null, status: null, openVeh: new Set() };
 try { SET.panel = localStorage.getItem("setPanel"); } catch {}
 
-const setPanelsEls = () => [...document.querySelectorAll(".set-panel")];
+const panelAllowed = (name) => !S.me?.users_enabled ? name !== "account" : S.me.is_admin ? true : name === "account";
+const setPanelsEls = () => [...document.querySelectorAll(".set-panel")].filter((p) => panelAllowed(p.dataset.panel));
 const relTime = (iso) => {
   if (!iso) return null;
   const d = new Date(iso), days = Math.floor((Date.now() - d) / 86400000);
@@ -34,19 +35,19 @@ function buildSetNav() {
   $("#setMobile").innerHTML = setPanelsEls().map((p) => `<option value="${p.dataset.panel}" ${p.dataset.panel === SET.panel ? "selected" : ""}>${p.dataset.ico} ${esc(p.dataset.title)}${p.dataset.panel === "status" && warn ? " •" : ""}</option>`).join("");
 }
 async function showSetPanel(name) {
-  if (!setPanelsEls().some((p) => p.dataset.panel === name)) name = "status";
+  if (!setPanelsEls().some((p) => p.dataset.panel === name)) name = panelAllowed("status") ? "status" : "account";
   SET.panel = name;
   try { localStorage.setItem("setPanel", name); } catch {}
-  setPanelsEls().forEach((p) => (p.hidden = p.dataset.panel !== name));
+  document.querySelectorAll(".set-panel").forEach((p) => (p.hidden = p.dataset.panel !== name));
   buildSetNav();
   const f = { status: setStatus, budget: setBudget, docs: setDocs, bank: setBank, plan: setPlan, vehicles: setVehicles,
-    contracts: setContracts, realestate: setRealestate, data: setData }[name];
+    contracts: setContracts, realestate: setRealestate, data: setData, users: setUsers, account: setAccount }[name];
   try { await f(); } catch (e) { toast(e.message, true); }
 }
 async function renderSettings() {
   buildSetNav();
   await showSetPanel(SET.panel || "status");
-  if (SET.panel !== "status" && !SET.status) api("/api/status").then((s) => { SET.status = s; buildSetNav(); }).catch(() => {});
+  if (panelAllowed("status") && SET.panel !== "status" && !SET.status) api("/api/status").then((s) => { SET.status = s; buildSetNav(); }).catch(() => {});
 }
 $("#setLinks").addEventListener("click", (e) => { const a = e.target.closest("[data-p]"); if (a) { e.preventDefault(); showSetPanel(a.dataset.p); } });
 $("#setMobile").onchange = (e) => showSetPanel(e.target.value);
@@ -273,11 +274,13 @@ function setContracts() {
   $("#setBadgeDays").value = S.settings.contract_badge_days ?? 30;
   $("#setCtCats").value = (S.settings.contract_categories || []).join("\n");
   $("#setLoanCats").value = (S.settings.loan_categories || []).join("\n");
+  $("#setAboCats").value = (S.settings.abo_categories || []).join("\n");
 }
 $("#setNoticeDays").onchange = (e) => saveSetting({ contract_notice_days: Number(e.target.value) || 120 });
 $("#setBadgeDays").onchange = (e) => saveSetting({ contract_badge_days: Number(e.target.value) || 30 });
 $("#setCtCats").onchange = (e) => saveSetting({ contract_categories: lines(e.target.value) });
 $("#setLoanCats").onchange = (e) => saveSetting({ loan_categories: lines(e.target.value) });
+$("#setAboCats").onchange = (e) => saveSetting({ abo_categories: lines(e.target.value) });
 
 // ------------------------------------------------------------ Immobilien & Projekte
 async function setRealestate() {
@@ -319,3 +322,89 @@ $("#setRestore").onchange = async (e) => {
 };
 $("#setRefreshMeta").onclick = async () => { await api("/api/maintenance/refresh", { method: "POST" }); S.meta = await api("/api/meta?refresh=true"); toast("Paperless-Daten neu geladen"); };
 $("#setRefreshKm").onclick = async () => { await api("/api/traccar/refresh", { method: "POST" }); toast("Kilometer werden neu geladen"); };
+
+
+// ------------------------------------------------------------ Benutzer & Rechte (nur Admin) / Mein Konto
+const LVL = [["none", "–"], ["view", "ansehen"], ["edit", "bearbeiten"]];
+async function setUsers() {
+  const me = S.me || {};
+  if (!me.users_enabled) {
+    $("#setUsers").innerHTML = `<div class="card"><h3>Benutzerverwaltung einschalten</h3>
+      <p class="muted small">Im Moment ist die App ohne Anmeldung offen. Lege zuerst <b>deinen eigenen Zugang als Administrator</b> an – danach
+        meldet sich jeder mit Benutzername und Passwort an, und du kannst weitere Benutzer mit eingeschränkten Rechten anlegen.</p>
+      <form id="firstAdmin" class="form" style="max-width:420px">
+        <label>Name<input name="name" placeholder="z.B. Peter" required></label>
+        <label>Benutzername<input name="username" autocomplete="username" required></label>
+        <label>Passwort (mind. 8 Zeichen)<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+        <label>Passwort wiederholen<input name="password2" type="password" autocomplete="new-password" minlength="8" required></label>
+        <div class="row"><button class="primary">Administrator anlegen und anmelden</button></div>
+      </form></div>`;
+    $("#firstAdmin").onsubmit = async (e) => {
+      e.preventDefault(); const f = e.target;
+      if (f.password.value !== f.password2.value) { toast("Die Passwörter stimmen nicht überein", true); return; }
+      try { await api("/api/users", { method: "POST", body: JSON.stringify({ name: f.name.value, username: f.username.value, password: f.password.value }) });
+        toast("Administrator angelegt"); setTimeout(() => location.reload(), 600); }
+      catch (err) { toast(err.message, true); }
+    };
+    return;
+  }
+  const users = await api("/api/users");
+  const areas = me.areas || [];
+  const sel = (u, a) => `<select data-perm="${a}" ${u.is_admin ? "disabled" : ""}>${LVL.map(([k, l]) => `<option value="${k}" ${(u.is_admin ? "edit" : (u.perms || {})[a] || "none") === k ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  $("#setUsers").innerHTML = `<div class="card"><div class="cardhead"><h3>Benutzer & Rechte</h3><button id="userAdd">+ Benutzer</button></div>
+    <p class="muted small">Pro Bereich: <b>–</b> = nicht sichtbar, <b>ansehen</b> = nur lesen, <b>bearbeiten</b> = ändern. Administratoren dürfen alles,
+      inkl. Einstellungen, Benutzer und Backup. Die Rechte prüft der Server bei jeder Anfrage. Ohne Recht auf „Einnahmen &amp; Lohn“ sind Einnahmen auch in der Übersicht ausgeblendet.</p>
+    <div class="tablewrap"><table class="etable users"><thead><tr><th>Name</th><th>Benutzer</th><th>Admin</th>${areas.map(([, l]) => `<th style="min-width:110px">${esc(l.split(" (")[0])}</th>`).join("")}<th>aktiv</th><th></th></tr></thead>
+    <tbody>${users.map((u) => `<tr data-uid="${u.id}">
+      <td><input data-uf="name" value="${esc(u.name || "")}"></td><td><input data-uf="username" value="${esc(u.username)}"></td>
+      <td><input type="checkbox" data-uf="is_admin" ${u.is_admin ? "checked" : ""}></td>
+      ${areas.map(([a]) => `<td>${sel(u, a)}</td>`).join("")}
+      <td><input type="checkbox" data-uf="active" ${u.active ? "checked" : ""}></td>
+      <td class="row"><button class="linkbtn" data-upw>Passwort</button>${me.user && me.user.id === u.id ? "" : `<button class="linkbtn danger" data-udel>löschen</button>`}</td></tr>`).join("")}</tbody></table></div></div>`;
+}
+$("#setUsers").addEventListener("change", async (e) => {
+  const tr = e.target.closest("[data-uid]"); if (!tr) return;
+  const id = tr.dataset.uid, el = e.target;
+  let body;
+  if (el.dataset.perm) {
+    const perms = {}; tr.querySelectorAll("[data-perm]").forEach((s) => (perms[s.dataset.perm] = s.value)); body = { perms };
+  } else if (el.dataset.uf) body = { [el.dataset.uf]: el.type === "checkbox" ? el.checked : el.value };
+  else return;
+  try { await api(`/api/users/${id}`, { method: "PUT", body: JSON.stringify(body) }); toast("Gespeichert"); if (el.dataset.uf === "is_admin") setUsers(); }
+  catch (err) { toast(err.message, true); setUsers(); }
+});
+$("#setUsers").addEventListener("click", async (e) => {
+  if (e.target.id === "userAdd") {
+    const n = await openDialog({ title: "Neuer Benutzer", label: "Name", ok: "Weiter" }); if (!n || !n.value) return;
+    const u = await openDialog({ title: "Benutzername", label: "zum Anmelden", value: n.value.toLowerCase().replace(/[^a-z0-9._-]/g, ""), ok: "Weiter" }); if (!u || !u.value) return;
+    const p = await openDialog({ title: "Passwort", label: "mind. 8 Zeichen – dem Benutzer mitteilen, er kann es unter „Konto“ ändern", ok: "Anlegen" }); if (!p || !p.value) return;
+    try { await api("/api/users", { method: "POST", body: JSON.stringify({ name: n.value, username: u.value, password: p.value, perms: { budget: "view" } }) });
+      toast("Benutzer angelegt – jetzt Rechte festlegen"); setUsers(); }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
+  const tr = e.target.closest("[data-uid]"); if (!tr) return;
+  try {
+    if (e.target.hasAttribute("data-upw")) {
+      const p = await openDialog({ title: "Neues Passwort", label: "mind. 8 Zeichen", ok: "Setzen" }); if (!p || !p.value) return;
+      await api(`/api/users/${tr.dataset.uid}`, { method: "PUT", body: JSON.stringify({ password: p.value }) }); toast("Passwort gesetzt – der Benutzer wird abgemeldet");
+    } else if (e.target.hasAttribute("data-udel")) {
+      if (!confirm("Benutzer löschen?")) return;
+      await api(`/api/users/${tr.dataset.uid}`, { method: "DELETE" }); setUsers();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+
+function setAccount() {
+  const me = S.me || {};
+  const lbl = { none: "kein Zugriff", view: "ansehen", edit: "bearbeiten" };
+  $("#myPerms").innerHTML = me.is_admin ? "Administrator – alle Bereiche bearbeiten, Einstellungen und Benutzer verwalten."
+    : (me.areas || []).map(([a, l]) => `${esc(l)}: <b>${lbl[(me.perms || {})[a] || "none"]}</b>`).join("<br>");
+}
+$("#pwForm").onsubmit = async (e) => {
+  e.preventDefault(); const f = e.target;
+  if (f.new.value !== f.new2.value) { toast("Die neuen Passwörter stimmen nicht überein", true); return; }
+  try { await api("/api/me/password", { method: "POST", body: JSON.stringify({ old: f.old.value, new: f.new.value }) }); f.reset(); toast("Passwort geändert"); }
+  catch (err) { toast(err.message, true); }
+};
+$("#logoutBtn").onclick = async (e) => { e.preventDefault(); try { await api("/api/logout", { method: "POST" }); } catch {} location.href = "/login.html"; };

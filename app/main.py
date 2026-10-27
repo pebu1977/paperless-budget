@@ -19,11 +19,11 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import bank, parking as pk, payslip as pay, purpose as purp, vehicles as veh
+from . import auth as au, bank, parking as pk, payslip as pay, purpose as purp, vehicles as veh
 
 # ---------------------------------------------------------------- Konfiguration
 PAPERLESS_URL = os.environ.get("PAPERLESS_URL", "http://paperless:8000").rstrip("/")
@@ -77,6 +77,8 @@ DEFAULT_SETTINGS = {
     "contract_categories": ["Versicherung", "Krankenkasse", "Telefon/Internet", "Energie", "Abo/Streaming", "Mitgliedschaft",
                             "Miete", "Leasing", "Service/Wartung", "Sonstiges"],
     "loan_categories": ["Hypothek", "Privatkredit", "Leasing", "Darlehen", "Sonstiges"],
+    "abo_categories": ["Streaming", "Musik", "Software/Cloud", "Zeitung/Magazin", "Fitness", "Mobilität", "Spiele", "Sonstiges"],
+    "abo_ignore": [],
     "last_backup": None,
 }
 NAME_KEYS = {"amount_field_name", "paid_tag_name", "paid_field_name", "order_tag_name", "nk_tag_name"}
@@ -84,9 +86,54 @@ NAME_KEYS = {"amount_field_name", "paid_tag_name", "paid_field_name", "order_tag
 app = FastAPI(title="Paperless Budget")
 
 
-# ---------------------------------------------------------------- Basic Auth (optional)
+# ---------------------------------------------------------------- Anmeldung: Benutzerverwaltung (oder optional Basic Auth)
+import contextvars  # noqa: E402
+
+CURRENT_USER: contextvars.ContextVar = contextvars.ContextVar("current_user", default=None)
+_users_cache: dict = {"t": 0.0, "n": 0}
+SESSION_DAYS = 30
+
+
+def users_enabled() -> bool:
+    if time.time() - _users_cache["t"] > 10:
+        with db() as con:
+            _users_cache.update(t=time.time(), n=con.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+    return _users_cache["n"] > 0
+
+
+def _user_row(r) -> dict:
+    u = dict(r)
+    u["perms"] = json.loads(u.get("perms") or "{}")
+    u["is_admin"] = bool(u["is_admin"])
+    u.pop("password", None)
+    return u
+
+
+def session_user(token: Optional[str]) -> Optional[dict]:
+    if not token:
+        return None
+    with db() as con:
+        r = con.execute("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires > ? AND u.active = 1",
+                        (au.token_hash(token), time.time())).fetchone()
+    return _user_row(r) if r else None
+
+
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
+    if users_enabled():
+        path = request.url.path
+        user = session_user(request.cookies.get("pb_session"))
+        if not user and not au.allowed(None, path, request.method):
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Nicht angemeldet"}, status_code=401)
+            return RedirectResponse("/login.html", status_code=302)
+        if user and not au.allowed(user, path, request.method):
+            return JSONResponse({"detail": "Keine Berechtigung für diesen Bereich"}, status_code=403)
+        tok = CURRENT_USER.set(user)
+        try:
+            return await call_next(request)
+        finally:
+            CURRENT_USER.reset(tok)
     if AUTH_USER:
         ok = False
         header = request.headers.get("authorization", "")
@@ -168,6 +215,13 @@ def init_db():
                 unit TEXT NOT NULL DEFAULT 'L',
                 amount REAL NOT NULL,
                 vehicle_id INTEGER                       -- fest zugeordnet (manuell); sonst über die Karte
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT,
+                password TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, perms TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created REAL NOT NULL, expires REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS payslips (
                 doc_id INTEGER PRIMARY KEY, title TEXT, date TEXT, employer TEXT, person TEXT, month TEXT,
@@ -1050,6 +1104,7 @@ class SettingsIn(BaseModel):
     contract_badge_days: Optional[int] = None
     contract_categories: Optional[list[str]] = None
     loan_categories: Optional[list[str]] = None
+    abo_categories: Optional[list[str]] = None
 
 
 @app.get("/api/settings")
@@ -1213,7 +1268,7 @@ async def summary(month: str):
         }
         for t in cats
     ]
-    incomes = incomes_between(start, end)
+    incomes = incomes_between(start, end) if au.can(CURRENT_USER.get(), "income") else []
     total_spent = round(sum(spent.values()), 2)
     total_income = round(sum(i["amount"] for i in incomes), 2)
     return {
@@ -1233,6 +1288,7 @@ async def summary(month: str):
 
 @app.get("/api/trend")
 async def trend(until: Optional[str] = None, months: int = 12):
+    show_income = au.can(CURRENT_USER.get(), "income")
     months = max(1, min(months, 36))
     last_start, _ = month_range(until or date.today().strftime("%Y-%m"))
     first = shift_month(last_start, -(months - 1))
@@ -1255,7 +1311,7 @@ async def trend(until: Optional[str] = None, months: int = 12):
             {
                 "month": key,
                 "spent": round(sum(d["amount"] for d in month_docs), 2),
-                "income": round(sum(i["amount"] for i in incomes_between(ms, me)), 2),
+                "income": round(sum(i["amount"] for i in incomes_between(ms, me)), 2) if show_income else 0,
                 "by_category": by_cat,
             }
         )
@@ -2402,6 +2458,168 @@ async def vehicle_report(until: Optional[str] = None, months: int = 12):
     return {"months": keys, "vehicles": out, "traccar_configured": bool(TRACCAR_URL), "traccar_error": traccar_error,
             "parking_unassigned": sorted(unassigned, key=lambda e: e["date"], reverse=True)[:50],
             "parking_configured": bool(st.get("parking_correspondent_ids") or st.get("parking_tag_ids"))}
+
+
+# ---------------------------------------------------------------- Benutzer & Anmeldung
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+def _new_session(user_id: int, request: Request) -> Response:
+    import asyncio  # noqa: F401
+    token = secrets.token_urlsafe(32)
+    with db() as con:
+        con.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+        con.execute("INSERT INTO sessions(token, user_id, created, expires) VALUES (?, ?, ?, ?)",
+                    (au.token_hash(token), user_id, time.time(), time.time() + SESSION_DAYS * 86400))
+    resp = JSONResponse({"ok": True})
+    https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    resp.set_cookie("pb_session", token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=https)
+    return resp
+
+
+@app.post("/api/login")
+async def login(body: LoginIn, request: Request):
+    import asyncio
+    with db() as con:
+        r = con.execute("SELECT * FROM users WHERE username = ? AND active = 1", (body.username.strip(),)).fetchone()
+    if not r or not au.verify_password(body.password, r["password"]):
+        await asyncio.sleep(1.0)       # Raten bremsen
+        raise HTTPException(401, "Benutzername oder Passwort falsch")
+    return _new_session(r["id"], request)
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    tok = request.cookies.get("pb_session")
+    if tok:
+        with db() as con:
+            con.execute("DELETE FROM sessions WHERE token = ?", (au.token_hash(tok),))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("pb_session")
+    return resp
+
+
+@app.get("/api/me")
+def me():
+    u = CURRENT_USER.get()
+    full = {a: "edit" for a in au.AREA_KEYS}
+    if not users_enabled():
+        return {"users_enabled": False, "user": None, "is_admin": True, "perms": full, "areas": au.AREAS}
+    return {"users_enabled": True, "user": {"id": u["id"], "name": u["name"], "username": u["username"]} if u else None,
+            "is_admin": bool(u and u["is_admin"]), "perms": full if u and u["is_admin"] else (u or {}).get("perms", {}), "areas": au.AREAS}
+
+
+class PasswordIn(BaseModel):
+    old: str
+    new: str
+
+
+@app.post("/api/me/password")
+def change_password(body: PasswordIn):
+    u = CURRENT_USER.get()
+    if not u:
+        raise HTTPException(400, "Benutzerverwaltung ist nicht aktiv")
+    if len(body.new) < 8:
+        raise HTTPException(400, "Das neue Passwort braucht mindestens 8 Zeichen")
+    with db() as con:
+        r = con.execute("SELECT password FROM users WHERE id = ?", (u["id"],)).fetchone()
+        if not au.verify_password(body.old, r["password"]):
+            raise HTTPException(400, "Bisheriges Passwort stimmt nicht")
+        con.execute("UPDATE users SET password = ? WHERE id = ?", (au.hash_password(body.new), u["id"]))
+    return {"ok": True}
+
+
+class UserIn(BaseModel):
+    username: Optional[str] = None
+    name: Optional[str] = None
+    password: Optional[str] = None
+    is_admin: Optional[bool] = None
+    perms: Optional[dict] = None
+    active: Optional[bool] = None
+
+
+def _clean_perms(p: Optional[dict]) -> dict:
+    return {a: (p or {}).get(a) if (p or {}).get(a) in au.LEVEL else "none" for a in au.AREA_KEYS}
+
+
+def _admins_left(con, excluding: Optional[int] = None) -> int:
+    return con.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1 AND active = 1 AND id != ?", (excluding or 0,)).fetchone()[0]
+
+
+@app.get("/api/users")
+def list_users():
+    with db() as con:
+        return [_user_row(r) for r in con.execute("SELECT * FROM users ORDER BY is_admin DESC, name, username")]
+
+
+@app.post("/api/users", status_code=201)
+def add_user(body: UserIn, request: Request):
+    """Ersten Benutzer darf jeder anlegen (wird Administrator und gleich angemeldet), danach nur Administratoren."""
+    first = not users_enabled()
+    if not body.username or not body.username.strip():
+        raise HTTPException(400, "Benutzername angeben")
+    if not body.password or len(body.password) < 8:
+        raise HTTPException(400, "Das Passwort braucht mindestens 8 Zeichen")
+    with db() as con:
+        try:
+            cur = con.execute("INSERT INTO users(username, name, password, is_admin, perms, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                              (body.username.strip(), (body.name or body.username).strip(), au.hash_password(body.password),
+                               1 if first else int(bool(body.is_admin)), json.dumps(_clean_perms(body.perms)),
+                               datetime.now().isoformat(timespec="seconds")))
+        except sqlite3.IntegrityError:
+            raise HTTPException(400, "Diesen Benutzernamen gibt es schon")
+        uid = cur.lastrowid
+    _users_cache["t"] = 0
+    if first:
+        return _new_session(uid, request)
+    return {"id": uid}
+
+
+@app.put("/api/users/{uid}")
+def update_user(uid: int, body: UserIn):
+    data = body.model_dump(exclude_unset=True)
+    with db() as con:
+        if not con.execute("SELECT 1 FROM users WHERE id = ?", (uid,)).fetchone():
+            raise HTTPException(404, "Benutzer nicht gefunden")
+        if (data.get("is_admin") is False or data.get("active") is False) and _admins_left(con, uid) == 0:
+            raise HTTPException(400, "Es muss mindestens ein aktiver Administrator bleiben")
+        sets, vals = [], []
+        if data.get("username"):
+            sets.append("username = ?"); vals.append(data["username"].strip())
+        if "name" in data:
+            sets.append("name = ?"); vals.append((data["name"] or "").strip())
+        if data.get("password"):
+            if len(data["password"]) < 8:
+                raise HTTPException(400, "Das Passwort braucht mindestens 8 Zeichen")
+            sets.append("password = ?"); vals.append(au.hash_password(data["password"]))
+            con.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        if "is_admin" in data:
+            sets.append("is_admin = ?"); vals.append(int(bool(data["is_admin"])))
+        if "perms" in data:
+            sets.append("perms = ?"); vals.append(json.dumps(_clean_perms(data["perms"])))
+        if "active" in data:
+            sets.append("active = ?"); vals.append(int(bool(data["active"])))
+            if not data["active"]:
+                con.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        if sets:
+            try:
+                con.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", [*vals, uid])
+            except sqlite3.IntegrityError:
+                raise HTTPException(400, "Diesen Benutzernamen gibt es schon")
+    return {"ok": True}
+
+
+@app.delete("/api/users/{uid}", status_code=204)
+def delete_user(uid: int):
+    with db() as con:
+        if _admins_left(con, uid) == 0:
+            raise HTTPException(400, "Der letzte Administrator kann nicht gelöscht werden")
+        con.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        con.execute("DELETE FROM users WHERE id = ?", (uid,))
+    _users_cache["t"] = 0
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------- Einstellungen: Status, Backup, Export

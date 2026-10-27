@@ -42,10 +42,10 @@ async function drawContract() {
   const r = await api(`/api/contracts/${CT.id}`);
   CT.detail = r;
   const c = r.contract, loan = c.kind === "kredit", d = CT.data;
-  $("#ctTitle").textContent = (loan ? "🏦 " : "📄 ") + c.name;
+  $("#ctTitle").textContent = (loan ? "🏦 " : c.kind === "abo" ? "🔁 " : "📄 ") + c.name;
   const corr = [["", "– keiner –"], ...S.meta.correspondents.map((x) => [x.id, x.name])];
   const tags = [["", "– kein Tag –"], ...S.meta.tags.map((x) => [x.id, x.name])];
-  const cats = [["", "–"], ...(loan ? d.loan_categories : d.categories).map((x) => [x, x])];
+  const cats = [["", "–"], ...(loan ? d.loan_categories : c.kind === "abo" ? (d.abo_categories || []) : d.categories).map((x) => [x, x])];
   const ivs = d.intervals.map((k) => [k, IV_LABEL[k]]);
   const fact = (l, v) => `<div><div class="l">${l}</div><div class="v">${v}</div></div>`;
   const facts = [

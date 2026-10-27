@@ -92,6 +92,13 @@ Kontobewegungen.
 
 ![Rest vom Lohn](docs/screenshots/rest-vom-lohn.png)
 
+### Abos
+- Eigener Tab mit allen Abos (Streaming, Musik, Software, Zeitung, Fitness …): Kosten pro Monat/Jahr, nächste Abbuchung,
+  letzte Zahlung, Kündigungstermin
+- **Erkennt wiederkehrende Zahlungen** in den Kontoauszügen (gleicher Händler, gleicher Betrag, monatlich/quartalsweise/jährlich)
+  und bekannte Abo-Anbieter – mit einem Klick als Abo übernehmen oder als „kein Abo“ ausblenden
+- Abos sind Verträge: Preisänderungen, Zahlungen und Belege unter „Details“
+
 ### Verträge & Kredite
 - Verträge mit Preis-Versionen, Kosten pro Monat/Jahr, Kündigungsterminen und Zahlungen aus den Kontoauszügen
 - Kredite mit Restschuld, Zins und Amortisationsplan
@@ -298,6 +305,23 @@ Abos …) und Kredite (Hypothek, Leasing, Privatkredit) verwaltet:
 - **Kredite**: Restschuld nach Plan (Anfangsbetrag minus Amortisation), Zins pro Jahr,
   Restschuld-Verlauf der nächsten Jahre. Bleibt der Betrag leer, wird die Rate aus Zins und Amortisation berechnet.
 
+## Benutzer & Rechte
+
+Ohne Benutzer ist die App offen (bzw. per `BASIC_AUTH_USER` geschützt). Unter *Einstellungen → Benutzer & Rechte* legst du
+zuerst deinen eigenen Zugang als **Administrator** an – danach meldet sich jeder mit Benutzername und Passwort an.
+
+Pro Benutzer und Bereich (Budget, Abgleich, Fahrzeuge, Immobilien, Projekte, Verträge & Abos, Einnahmen & Lohn):
+**–** = nicht sichtbar, **ansehen** = nur lesen, **bearbeiten** = ändern. Administratoren dürfen zusätzlich Einstellungen,
+Benutzer, Backup und Export. Der Server prüft die Rechte bei jeder Anfrage; ohne Recht auf „Einnahmen & Lohn“ sind
+Einnahmen auch in der Übersicht ausgeblendet. Der letzte Administrator kann nicht gelöscht oder herabgestuft werden.
+Passwörter werden gehasht gespeichert (PBKDF2), Sitzungen laufen 30 Tage. Jeder Benutzer ändert sein Passwort unter *Konto*.
+
+**Passwort des Administrators vergessen?** Auf dem Server alle Benutzer entfernen – danach ist die App wieder offen und du
+legst den Administrator neu an:
+```bash
+docker exec paperless-budget python -c "import sqlite3;c=sqlite3.connect('/data/budget.db');c.execute('DELETE FROM sessions');c.execute('DELETE FROM users');c.commit()"
+```
+
 ## Konfiguration
 
 In der `.env` stehen Adressen und Zugangsdaten. Namen von Tags und Feldern (`AMOUNT_FIELD_NAME`, `PAID_*`,
@@ -349,7 +373,8 @@ app/realestate.py    Nebenkosten berechnen, Abrechnung als Word erzeugen
 app/re_api.py        API für Liegenschaften, Mieten, Projekte und Zuordnungen
 app/contracts_api.py Verträge und Kredite (Versionen, Zahlungen, Kündigungstermine, Restschuld)
 app/planning_api.py  Vormerkungen (Bestellungen) und „Rest vom Lohn“
-app/static/settings.js  Einstellungen (Rubriken, Sofort-Speichern, Status, Backup)
+app/static/settings.js  Einstellungen (Rubriken, Sofort-Speichern, Status, Backup, Benutzer)
+app/auth.py          Benutzer & Rechte: Passwort-Hashing, Zuordnung der API-Routen zu Bereichen
 app/static/          Frontend (HTML, CSS, Vanilla JS, Chart.js lokal eingebunden)
 ```
 

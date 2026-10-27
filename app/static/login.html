@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anmelden · Budget</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .login { max-width: 360px; margin: 12vh auto 0; padding: 0 16px; }
+    .login .card { padding: 24px; }
+    .login h1 { font-size: 22px; margin: 0 0 4px; }
+    .login .err { color: var(--bad); font-size: 13px; min-height: 18px; }
+    .login button { width: 100%; }
+  </style>
+</head>
+<body>
+  <div class="login">
+    <div class="card">
+      <h1>Budget <span class="muted">· Paperless</span></h1>
+      <p class="muted small">Bitte anmelden.</p>
+      <form id="f" class="form">
+        <label>Benutzername<input name="username" autocomplete="username" required autofocus></label>
+        <label>Passwort<input name="password" type="password" autocomplete="current-password" required></label>
+        <div class="err" id="err"></div>
+        <button class="primary">Anmelden</button>
+      </form>
+    </div>
+  </div>
+  <script>
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target, err = document.getElementById("err");
+      err.textContent = ""; f.querySelector("button").disabled = true;
+      try {
+        const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: f.username.value, password: f.password.value }) });
+        if (r.ok) { location.href = "/"; return; }
+        const j = await r.json().catch(() => ({}));
+        err.textContent = j.detail || "Anmeldung fehlgeschlagen";
+      } catch { err.textContent = "Server nicht erreichbar"; }
+      f.querySelector("button").disabled = false;
+    };
+  </script>
+</body>
+</html>

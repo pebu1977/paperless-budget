@@ -15,6 +15,7 @@
 <body>
   <header class="topbar">
     <div class="brand">Budget <span class="muted">· Paperless</span></div>
+    <div id="userBox" class="userbox" hidden><span>👤 <span id="userName"></span></span><a href="#" data-gosettings="account">Konto</a><a href="#" id="logoutBtn">Abmelden</a></div>
     <div class="monthnav">
       <button id="prevMonth" aria-label="Vormonat">‹</button>
       <span id="monthLabel"></span>
@@ -29,6 +30,7 @@
       <button data-view="realestate">Immobilien</button>
       <button data-view="projects">Projekte</button>
       <button data-view="contracts">Verträge <span id="ctBadge" class="badge" hidden></span></button>
+      <button data-view="abos">Abos</button>
       <button data-view="income">Einnahmen</button>
       <button data-view="settings">Einstellungen</button>
     </nav>
@@ -36,6 +38,7 @@
 
   <main>
     <div id="alert" class="alert" hidden></div>
+    <div id="roBanner" class="card hint" hidden>👁 Du kannst diesen Bereich nur ansehen – Änderungen werden nicht gespeichert.</div>
 
     <!-- Übersicht -->
     <section id="view-overview" class="view">
@@ -99,7 +102,8 @@
       <div class="card">
         <div class="cardhead">
           <h3>Ausgaben im Monat</h3>
-          <div class="row"><input id="expSearch" type="search" placeholder="Suchen …"><select id="expFilter"></select></div>
+          <div class="row"><input id="expSearch" type="search" placeholder="Suchen …"><select id="expFilter"></select>
+            <label class="check small" style="white-space:nowrap"><input type="checkbox" id="expShowOut"> nicht berücksichtigte anzeigen <span id="expOutCount" class="muted"></span></label></div>
         </div>
         <div class="tablewrap">
           <table class="table">
@@ -274,6 +278,23 @@
           <div class="cardhead"><h3 id="ctTitle">Vertrag wählen</h3></div>
           <div id="ctDetail" class="muted small">Links einen Vertrag oder Kredit anklicken – oder mit <b>+ Vertrag</b> einen neuen anlegen.</div>
         </div>
+      </div>
+    </section>
+
+    <!-- Abos -->
+    <section id="view-abos" class="view" hidden>
+      <div class="kpis" id="aboKpis"></div>
+      <div class="card">
+        <div class="cardhead"><h3>Meine Abos</h3><button id="aboAdd">+ Abo</button></div>
+        <p class="muted small">Zahlungen werden über das Stichwort automatisch aus den Kontoauszügen zugeordnet. „Details“ zeigt Preisänderungen, Zahlungen und Belege.</p>
+        <div class="tablewrap"><table class="etable" id="aboTable"><thead><tr><th>Abo</th><th style="width:150px">Kategorie</th><th class="num" style="width:100px">Betrag</th>
+          <th style="width:130px">Intervall</th><th class="num" style="width:90px">/ Monat</th><th style="width:105px">nächste</th><th style="width:105px">letzte Zahlung</th>
+          <th style="width:60px">aktiv</th><th style="width:110px"></th></tr></thead><tbody id="aboBody"></tbody></table></div>
+      </div>
+      <div class="card">
+        <div class="cardhead"><h3>Erkannte wiederkehrende Zahlungen</h3><button id="aboRescan" class="linkbtn">neu suchen</button></div>
+        <p class="muted small">Belastungen aus den Kontoauszügen, die regelmässig mit gleichem Betrag wiederkommen – oder bekannte Abo-Anbieter. Übernehmen oder als „kein Abo“ ausblenden.</p>
+        <div id="aboSuggest"></div>
       </div>
     </section>
 
@@ -452,6 +473,7 @@
               <h3>Kategorien</h3>
               <div class="field"><div class="lbl"><b>Verträge</b><span>eine pro Zeile</span></div><textarea id="setCtCats" rows="6"></textarea></div>
               <div class="field"><div class="lbl"><b>Kredite</b><span>eine pro Zeile</span></div><textarea id="setLoanCats" rows="4"></textarea></div>
+              <div class="field"><div class="lbl"><b>Abos</b><span>eine pro Zeile</span></div><textarea id="setAboCats" rows="5"></textarea></div>
             </div>
           </div>
 
@@ -462,6 +484,23 @@
             </div>
             <div class="card"><h3>Häuser</h3><div id="setProps" class="muted small">–</div></div>
             <div class="card"><h3>Projekte</h3><div id="setProjects" class="muted small">–</div></div>
+          </div>
+
+          <div class="set-panel" data-panel="users" data-title="Benutzer & Rechte" data-ico="👥" hidden>
+            <div id="setUsers"></div>
+          </div>
+
+          <div class="set-panel" data-panel="account" data-title="Mein Konto" data-ico="🔑" hidden>
+            <div class="card">
+              <h3>Passwort ändern</h3>
+              <form id="pwForm" class="form" style="max-width:420px">
+                <label>Bisheriges Passwort<input name="old" type="password" autocomplete="current-password" required></label>
+                <label>Neues Passwort (mind. 8 Zeichen)<input name="new" type="password" autocomplete="new-password" minlength="8" required></label>
+                <label>Neues Passwort wiederholen<input name="new2" type="password" autocomplete="new-password" minlength="8" required></label>
+                <div class="row"><button class="primary">Passwort ändern</button></div>
+              </form>
+            </div>
+            <div class="card"><h3>Meine Rechte</h3><div id="myPerms" class="muted small"></div></div>
           </div>
 
           <div class="set-panel" data-panel="data" data-title="Daten & Wartung" data-ico="💾" hidden>
@@ -558,5 +597,6 @@
   <script src="contracts.js"></script>
   <script src="plan.js"></script>
   <script src="settings.js"></script>
+  <script src="abos.js"></script>
 </body>
 </html>

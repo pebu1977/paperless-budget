@@ -19,6 +19,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (r.status === 401 && !path.startsWith("/api/login")) { location.href = "/login.html"; throw new Error("Nicht angemeldet"); }
   if (!r.ok) {
     let msg = r.statusText;
     try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
@@ -114,10 +115,30 @@ const purposeHtml = (d) => d.purpose
 const whyHtml = (d) => d.excluded ? `<span class="why">${esc(d.exclude_reason || "nicht berücksichtigt")}</span>` : "";
 
 // ------------------------------------------------------------ Navigation
+const VIEW_AREA = { overview: "budget", expenses: "budget", review: "budget", bank: "bank", vehicles: "vehicles", realestate: "realestate",
+  projects: "projects", contracts: "contracts", abos: "contracts", income: "income" };
+const canSee = (area) => !S.me || S.me.is_admin || ["view", "edit"].includes((S.me.perms || {})[area]);
+const canEdit = (area) => !S.me || S.me.is_admin || (S.me.perms || {})[area] === "edit";
+function applyPermissions() {
+  document.querySelectorAll(".tabs button").forEach((b) => {
+    const a = VIEW_AREA[b.dataset.view];
+    b.hidden = a ? !canSee(a) : false;
+  });
+  const me = S.me;
+  $("#userBox").hidden = !me?.users_enabled;
+  if (me?.users_enabled && me.user) $("#userName").textContent = me.user.name || me.user.username;
+  if (VIEW_AREA[S.view] && !canSee(VIEW_AREA[S.view])) {
+    const first = [...document.querySelectorAll(".tabs button")].find((b) => !b.hidden);
+    S.view = first ? first.dataset.view : "settings";
+  }
+}
 function setView(view) {
+  if (VIEW_AREA[view] && !canSee(VIEW_AREA[view])) return;
   S.view = view;
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== "view-" + view));
+  const ro = VIEW_AREA[view] && !canEdit(VIEW_AREA[view]);
+  $("#roBanner").hidden = !ro;
   render();
 }
 document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
@@ -138,6 +159,7 @@ async function render() {
     if (S.view === "realestate") await renderRE();
     if (S.view === "projects") await renderProjects();
     if (S.view === "contracts") await renderContracts();
+    if (S.view === "abos") await renderAbos();
     if (S.view === "settings") await renderSettings();
   } catch (e) { showAlert(e.message); }
   updateReviewBadge();
@@ -282,12 +304,18 @@ async function renderExpenses() {
   drawExpenses();
 }
 $("#expFilter").onchange = drawExpenses;
+try { $("#expShowOut").checked = localStorage.getItem("expShowOut") === "1"; } catch {}
+$("#expShowOut").onchange = (e) => { try { localStorage.setItem("expShowOut", e.target.checked ? "1" : "0"); } catch {} drawExpenses(); };
 
 $("#expSearch").oninput = () => drawExpenses();
 function drawExpenses() {
   const f = $("#expFilter").value, q = $("#expSearch").value.trim().toLowerCase();
+  const showOut = $("#expShowOut").checked;
   let list = expDocs.filter((d) => f === "out" ? d.excluded
-    : (f === "all" || (f === "none" ? d.category == null : d.category === Number(f))) && (f === "all" || !d.excluded));
+    : (f === "all" || (f === "none" ? d.category == null : d.category === Number(f))) && (showOut || !d.excluded));
+  const hidden = f === "out" || showOut ? 0 : expDocs.filter((d) => d.excluded).length;
+  $("#expOutCount").textContent = hidden ? `(${hidden})` : "";
+  $("#expShowOut").closest("label").hidden = f === "out";
   if (q) list = list.filter((d) => `${d.purpose || ""} ${d.title} ${corrName(d.correspondent)} ${d.exclude_reason || ""}`.toLowerCase().includes(q));
   $("#expBody").innerHTML = list.length ? list.map((d) => `<tr data-id="${d.id}" class="${d.excluded ? "out" : ""}">
       <td><input type="checkbox" class="budget" ${d.excluded ? "" : "checked"} ${d.exclude_source === "tag" ? "disabled" : ""} title="Im Budget berücksichtigen"></td>
@@ -301,7 +329,8 @@ function drawExpenses() {
   const counted = list.filter((d) => !d.excluded && d.amount != null);
   $("#expTotal").textContent = fmt(counted.reduce((a, d) => a + d.amount, 0));
   const nOut = list.filter((d) => d.excluded).length;
-  $("#expTotalNote").textContent = nOut && f !== "out" ? `(ohne ${nOut} nicht berücksichtigte)` : f === "out" ? "(zählt nicht zum Budget)" : "";
+  $("#expTotalNote").textContent = nOut && f !== "out" ? `(ohne ${nOut} nicht berücksichtigte)` : f === "out" ? "(zählt nicht zum Budget)"
+    : hidden ? `(${hidden} nicht berücksichtigte ausgeblendet)` : "";
 }
 $("#expBody").addEventListener("click", async (e) => {
   const tr = e.target.closest("tr[data-id]"); if (!tr) return;
@@ -934,6 +963,11 @@ $("#fuelForm").onsubmit = async (e) => {
 // ------------------------------------------------------------ Start
 (async function init() {
   $("#monthLabel").textContent = monthLabel(S.month);
+  try { S.me = await api("/api/me"); } catch { S.me = null; }
+  applyPermissions();
+  document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== "view-" + S.view));
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === S.view));
+  $("#roBanner").hidden = !(VIEW_AREA[S.view] && !canEdit(VIEW_AREA[S.view]));
   try {
     [S.meta, S.settings, S.budgets, S.vehicles] = await Promise.all([api("/api/meta"), api("/api/settings"), api("/api/budgets"), api("/api/vehicles")]);
   } catch (e) { showAlert("Verbindung zu Paperless fehlgeschlagen: " + e.message); return; }
