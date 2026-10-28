@@ -715,7 +715,8 @@ def get_file(name: str):
 def _kw_match(match_text: str, hay: str) -> bool:
     hay = hay.lower()
     for kw in (match_text or "").split(","):
-        terms = [t.strip().lower() for t in kw.split("+") if t.strip()]
+        # zu kurze Begriffe (z.B. „CH“ aus einer kopierten Adresse) würden fast jede Buchung treffen
+        terms = [t.strip().lower() for t in kw.split("+") if len(t.strip()) >= 3]
         if terms and all(t in hay for t in terms):
             return True
     return False
@@ -827,6 +828,15 @@ def rent_overview(pid: int, year: int):
         if fit:
             kw = [t for t in fit if t.get("match_text") and _kw_match(t["match_text"], hay)]
             c["suggest"] = (kw or fit)[0]["id"]
+            if not kw:
+                c["hint"] = f"Betrag passt, Stichwort „{fit[0].get('match_text') or '–'}“ nicht im Buchungstext"
+        else:   # Stichwort passt, aber Betrag oder Datum nicht: Grund anzeigen
+            kwt = next((t for t in p["tenancies"] if t.get("match_text") and _kw_match(t["match_text"], hay)), None)
+            if kwt:
+                exp = (kwt["rent"] or 0) + (kwt["akonto"] or 0)
+                c["suggest"] = kwt["id"]
+                c["hint"] = (f"Stichwort passt, aber Zahlung ausserhalb der Mietdauer (ab {kwt['start']})" if not _in_tenancy(c["date"], kwt)
+                             else f"Stichwort passt, aber Betrag ≠ Monatsmiete {exp:.2f} (Miete + Akonto in der Einrichtung prüfen)")
     return {"months": months, "tenancies": out, "unassigned_credits": open_credits}
 
 

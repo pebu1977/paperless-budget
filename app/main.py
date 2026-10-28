@@ -1619,7 +1619,8 @@ async def parse_statement_doc(doc_id: int):
 @app.post("/api/statements/parse-new")
 async def parse_new_statements():
     statements = await list_statements()
-    results = [await parse_one(s["id"]) for s in statements if not s["parsed_at"]]
+    # neue Auszüge – und solche ohne Buchungen erneut (z.B. Einzelbelege, die eine ältere Version nicht lesen konnte)
+    results = [await parse_one(s["id"]) for s in statements if not s["parsed_at"] or not s["tx_count"]]
     return {"parsed": len(results), "added": sum(r["added"] for r in results), "results": results}
 
 

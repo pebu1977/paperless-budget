@@ -235,7 +235,8 @@ async function reRent(p) {
   </div>
   ${r.tenancies.map((t) => `<div class="card"><h3>Erkannte Mietzahlungen · ${esc(t.tenancy.tenant_name)}</h3>
     <p class="muted small">Automatisch nur, wenn das Stichwort (${t.tenancy.match_text ? `„${esc(t.tenancy.match_text)}“` : "<b>keins erfasst</b> – unter Einrichtung → Mietverhältnis"}) im Buchungstext steht
-      <b>und</b> der Betrag zur Monatsmiete von ${fmt(t.tenancy.rent + t.tenancy.akonto)} passt (oder einem Vielfachen).</p>
+      <b>und</b> der Betrag zur Monatsmiete von ${fmt(t.tenancy.rent + t.tenancy.akonto)} passt (oder einem Vielfachen).
+      ${(t.tenancy.match_text || "").split(",").length > 2 ? `<br><b>Hinweis:</b> Komma heisst „oder“ – jedes Wort zwischen den Kommas genügt allein. Am besten nur den Nachnamen eintragen (z.B. „${esc(t.tenancy.match_text.split(",")[0].trim())}“).` : ""}</p>
     ${t.bookings.length ? `<table class="tbl small"><thead><tr><th>Eingang</th><th>für Monat</th><th class="num">Betrag</th><th>Buchungstext</th><th></th><th></th></tr></thead><tbody>
       ${t.bookings.map((b) => `<tr data-tx="${b.tx_id}" data-ten="${t.tenancy.id}"><td>${fmtDate(b.date)}</td>
         <td><select class="rp-month">${r.months.map((m) => `<option value="${m}" ${m === b.month ? "selected" : ""}>${mlabel(m)}</option>`).join("")}</select></td>
@@ -245,8 +246,9 @@ async function reRent(p) {
   <div class="card"><h3>Nicht zugeordnete Gutschriften</h3>
     ${r.unassigned_credits.length ? r.unassigned_credits.map((c) => { const sg = r.tenancies.find((t) => t.tenancy.id === c.suggest);
       return `<div class="invitem ${sg ? "rp-sug" : ""}" data-tx="${c.id}">
-      <span>${fmtDate(c.date)} · <b>${esc(c.merchant || c.text.slice(0, 50))}</b> <span class="muted small">${esc(c.text.slice(0, 80))}</span></span>
-      <span class="row"><b class="num">${fmt(c.amount)}</b>${sg ? `<button class="rp-take" data-ten="${sg.tenancy.id}" title="Betrag passt zur Miete">Miete ${esc(sg.tenancy.tenant_name)}?</button>` : ""}
+      <span>${fmtDate(c.date)} · <b>${esc(c.merchant || c.text.slice(0, 50))}</b> <span class="muted small">${esc(c.text.slice(0, 80))}</span>
+        ${c.hint ? `<div class="small" style="color:var(--warn,#b26a00)">${esc(c.hint)}</div>` : ""}</span>
+      <span class="row"><b class="num">${fmt(c.amount)}</b>${sg ? `<button class="rp-take" data-ten="${sg.tenancy.id}">Miete ${esc(sg.tenancy.tenant_name)}?</button>` : ""}
         ${tenOpts ? `<select class="rp-ten"><option value="">als Miete von …</option>${tenOpts}</select>` : ""}</span></div>`; }).join("")
     : `<div class="empty">Keine offenen Gutschriften.</div>`}
   </div>`;
@@ -423,7 +425,7 @@ function reSetup(p) {
       { f: "salutation", label: "Anrede", ph: "Sehr geehrte Frau …" },
       { f: "start", label: "Beginn", type: "date", w: "130px" }, { f: "end", label: "Ende", type: "date", w: "130px" },
       { f: "rent", label: "Miete/Mt.", type: "number", w: "90px" }, { f: "akonto", label: "Akonto/Mt.", type: "number", w: "90px" },
-      { f: "match_text", label: "Stichworte Zahlung", ph: "nachname" }])}</div></div>
+      { f: "match_text", label: "Stichworte Zahlung", ph: "Nachname (Komma = oder, + = und)" }])}</div></div>
 
   <div class="card" id="fixedCard"><h3>Fixkosten</h3>
     <p class="muted small">Wiederkehrende Kosten ohne Beleg, z.B. Hauswart-Pauschale. „nur …“ = einer Wohnung individuell belastet.</p>
