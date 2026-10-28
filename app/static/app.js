@@ -15,6 +15,23 @@ const vehName = (id) => S.vehicles.find((v) => v.id === id)?.name ?? "";
 const vehicleOptions = (sel, empty = "Fahrzeug …") => `<option value="">${empty}</option>` +
   S.vehicles.filter((v) => v.active || v.id === sel).map((v) => `<option value="${v.id}" ${v.id === sel ? "selected" : ""}>${esc(v.name)}</option>`).join("");
 const $ = (sel) => document.querySelector(sel);
+
+// Datumsfelder: Browser melden „change“ schon beim Tippen des Jahres (20 → 0020). Erst beim Verlassen des Feldes
+// und nur mit plausiblem Jahr weitergeben – gilt für alle Felder, die sofort speichern.
+const dateOk = (v) => !v || (+v.slice(0, 4) >= 1900 && +v.slice(0, 4) <= 2200);
+window.addEventListener("change", (e) => {
+  const t = e.target;
+  if (!t.matches?.('input[type="date"]') || t._pbCommit) return;
+  if (document.activeElement === t || !dateOk(t.value)) { e.stopImmediatePropagation(); t._pbPending = true; }
+}, true);
+window.addEventListener("focusout", (e) => {
+  const t = e.target;
+  if (!t.matches?.('input[type="date"]') || !t._pbPending) return;
+  if (!dateOk(t.value)) { toast("Datum unvollständig – Jahr vierstellig eingeben", true); return; }
+  t._pbPending = false; t._pbCommit = true;
+  t.dispatchEvent(new Event("change", { bubbles: true }));
+  t._pbCommit = false;
+}, true);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 async function api(path, opts = {}) {
