@@ -225,20 +225,41 @@ async function reRent(p) {
   const mlabel = (m) => MONTHS[Number(m.slice(5)) - 1].slice(0, 3) + " " + m.slice(2, 4);
   const tenOpts = r.tenancies.map((t) => `<option value="${t.tenancy.id}">${esc(t.tenancy.tenant_name)} (${esc(t.unit_name)})</option>`).join("");
   $("#reBody").innerHTML = `<div class="card"><h3>Mietzinseingänge ${esc(periodLabel(p, RE.year))}</h3>
-    <p class="muted small">Gutschriften aus den Kontoauszügen werden über die Stichworte im Mietverhältnis (Einrichtung) automatisch erkannt. Zahlungen ab dem 20. gelten für den Folgemonat.</p>
+    <p class="muted small">Gutschriften aus den Kontoauszügen werden über Stichwort und Betrag erkannt (Einrichtung → Mietverhältnis). Zahlungen ab dem 20. gelten für den Folgemonat. Unter dem Betrag steht das Eingangsdatum.</p>
     ${r.tenancies.length ? `<div class="matrix"><table><thead><tr><th style="text-align:left">Mieter</th>${r.months.map((m) => `<th>${mlabel(m)}</th>`).join("")}<th>Total</th><th>Ausstand</th></tr></thead>
     <tbody>${r.tenancies.map((t) => `<tr><td style="text-align:left"><b>${esc(t.tenancy.tenant_name)}</b><br><span class="muted">${esc(t.unit_name)} · ${fmt(t.tenancy.rent + t.tenancy.akonto)}/Mt.</span></td>
       ${t.months.map((m) => { const c = !m.due && !m.paid ? "na" : m.paid >= m.due - 0.01 ? "ok" : m.paid > 0 ? "part" : m.month > new Date().toISOString().slice(0, 7) ? "na" : "miss";
-        return `<td class="${c}" title="${m.payments.map((x) => `${fmtDate(x.date)}: ${fmt(x.amount)}`).join("\n")}">${m.paid ? fmt2(m.paid) : m.due ? "–" : ""}</td>`; }).join("")}
+        return `<td class="${c}" title="${m.payments.map((x) => `${fmtDate(x.date)}: ${fmt(x.amount)}`).join("\n")}">${m.paid ? fmt2(m.paid) : m.due ? "–" : ""}${m.payments.length ? `<br><span class="muted small">${m.payments.map((x) => fmtDate(x.date).replace(/\d{4}$/, "")).join(" ")}</span>` : ""}</td>`; }).join("")}
       <td><b>${fmt(t.paid_total)}</b><br><span class="muted">von ${fmt(t.due_total)}</span></td><td class="${t.arrears > 0.5 ? "miss" : "ok"}">${fmt(t.arrears)}</td></tr>`).join("")}</tbody></table></div>`
     : `<div class="empty">Keine Mietverhältnisse in dieser Periode – unter Einrichtung erfassen.</div>`}
   </div>
+  ${r.tenancies.map((t) => `<div class="card"><h3>Erkannte Mietzahlungen · ${esc(t.tenancy.tenant_name)}</h3>
+    <p class="muted small">Automatisch nur, wenn das Stichwort (${t.tenancy.match_text ? `„${esc(t.tenancy.match_text)}“` : "<b>keins erfasst</b> – unter Einrichtung → Mietverhältnis"}) im Buchungstext steht
+      <b>und</b> der Betrag zur Monatsmiete von ${fmt(t.tenancy.rent + t.tenancy.akonto)} passt (oder einem Vielfachen).</p>
+    ${t.bookings.length ? `<table class="tbl small"><thead><tr><th>Eingang</th><th>für Monat</th><th class="num">Betrag</th><th>Buchungstext</th><th></th><th></th></tr></thead><tbody>
+      ${t.bookings.map((b) => `<tr data-tx="${b.tx_id}" data-ten="${t.tenancy.id}"><td>${fmtDate(b.date)}</td>
+        <td><select class="rp-month">${r.months.map((m) => `<option value="${m}" ${m === b.month ? "selected" : ""}>${mlabel(m)}</option>`).join("")}</select></td>
+        <td class="num">${fmt(b.amount)}</td><td class="muted">${esc(b.text)}</td><td><span class="pill ${b.auto ? "" : "grey"}">${b.auto ? "automatisch" : "von Hand"}</span></td>
+        <td><button class="linkbtn danger rp-del" title="Keine Mietzahlung – wird nicht mehr automatisch zugeordnet">entfernen</button></td></tr>`).join("")}
+    </tbody></table>` : `<div class="empty">Noch keine Zahlungen erkannt.</div>`}</div>`).join("")}
   <div class="card"><h3>Nicht zugeordnete Gutschriften</h3>
-    ${r.unassigned_credits.length ? r.unassigned_credits.map((c) => `<div class="invitem" data-tx="${c.id}">
+    ${r.unassigned_credits.length ? r.unassigned_credits.map((c) => { const sg = r.tenancies.find((t) => t.tenancy.id === c.suggest);
+      return `<div class="invitem ${sg ? "rp-sug" : ""}" data-tx="${c.id}">
       <span>${fmtDate(c.date)} · <b>${esc(c.merchant || c.text.slice(0, 50))}</b> <span class="muted small">${esc(c.text.slice(0, 80))}</span></span>
-      <span class="row"><b class="num">${fmt(c.amount)}</b>${tenOpts ? `<select class="rp-ten"><option value="">als Miete von …</option>${tenOpts}</select>` : ""}</span></div>`).join("")
+      <span class="row"><b class="num">${fmt(c.amount)}</b>${sg ? `<button class="rp-take" data-ten="${sg.tenancy.id}" title="Betrag passt zur Miete">Miete ${esc(sg.tenancy.tenant_name)}?</button>` : ""}
+        ${tenOpts ? `<select class="rp-ten"><option value="">als Miete von …</option>${tenOpts}</select>` : ""}</span></div>`; }).join("")
     : `<div class="empty">Keine offenen Gutschriften.</div>`}
   </div>`;
+  const post = async (tx, ten, month) => { await api("/api/rent-payments", { method: "POST", body: JSON.stringify({ tx_id: Number(tx), tenancy_id: Number(ten), month }) }); };
+  document.querySelectorAll(".rp-take").forEach((b) => b.onclick = async () => {
+    await post(b.closest("[data-tx]").dataset.tx, b.dataset.ten); toast("Als Mietzahlung erfasst"); renderRE();
+  });
+  document.querySelectorAll(".rp-month").forEach((s) => s.onchange = async () => {
+    const tr = s.closest("tr"); await post(tr.dataset.tx, tr.dataset.ten, s.value); toast("Monat geändert"); renderRE();
+  });
+  document.querySelectorAll(".rp-del").forEach((b) => b.onclick = async () => {
+    await api(`/api/rent-payments/${b.closest("tr").dataset.tx}`, { method: "DELETE" }); toast("Zuordnung entfernt"); renderRE();
+  });
   document.querySelectorAll(".rp-ten").forEach((s) => s.onchange = async () => {
     if (!s.value) return;
     await api("/api/rent-payments", { method: "POST", body: JSON.stringify({ tx_id: Number(s.closest("[data-tx]").dataset.tx), tenancy_id: Number(s.value) }) });

@@ -722,29 +722,55 @@ def _rent_month(d: str) -> str:
     return dt.strftime("%Y-%m")
 
 
+def _rent_fits(amount: float, ten: dict) -> bool:
+    """Betrag passt zur Monatsmiete (Miete + Akonto) – auch zwei oder drei Monate auf einmal; Toleranz 2 %, mind. CHF 2."""
+    exp = (ten["rent"] or 0) + (ten["akonto"] or 0)
+    if exp <= 0:
+        return False
+    return any(abs(amount - k * exp) <= max(2.0, 0.02 * k * exp) for k in (1, 2, 3))
+
+
+def _in_tenancy(d: str, ten: dict) -> bool:
+    s = date.fromisoformat(ten["start"]) - timedelta(days=31)
+    e = (date.fromisoformat(ten["end"]) if ten["end"] else date(2999, 1, 1)) + timedelta(days=31)
+    return s.isoformat() <= d <= e.isoformat()
+
+
+def _rent_auto_ok(t, ten: dict) -> bool:
+    """Automatisch nur, wenn Stichwort UND Betrag passen und die Zahlung in die Mietdauer fällt."""
+    hay = f"{t['merchant'] or ''} {t['text']}"
+    return _in_tenancy(t["date"], ten) and _kw_match(ten["match_text"], hay) and _rent_fits(t["amount"], ten)
+
+
+def _rent_parts(amount: float, ten) -> tuple[float, float]:
+    exp = (ten["rent"] or 0) + (ten["akonto"] or 0)
+    ak = ten["akonto"] or 0
+    akonto_part = rx.r2(amount * ak / exp) if exp else 0
+    return rx.r2(amount - akonto_part), akonto_part
+
+
 def auto_assign_rent(con) -> int:
-    tenancies = [dict(r) for r in con.execute("SELECT * FROM tenancies WHERE match_text IS NOT NULL AND match_text != ''")]
+    tenancies = {r["id"]: dict(r) for r in con.execute("SELECT * FROM tenancies WHERE match_text IS NOT NULL AND match_text != ''")}
+    # früher automatisch zugeordnete Buchungen, die die Regeln nicht (mehr) erfüllen, wieder lösen
+    for r in con.execute("SELECT rp.tx_id, rp.tenancy_id, t.* FROM rent_payments rp JOIN transactions t ON t.id = rp.tx_id "
+                         "WHERE rp.auto = 1 AND rp.tenancy_id != 0").fetchall():
+        ten = tenancies.get(r["tenancy_id"])
+        if not ten or not _rent_auto_ok(r, ten):
+            con.execute("DELETE FROM rent_payments WHERE tx_id = ?", (r["tx_id"],))
     if not tenancies:
         return 0
     taken = {r[0] for r in con.execute("SELECT tx_id FROM rent_payments")}
     n = 0
-    for t in con.execute("SELECT * FROM transactions WHERE amount > 0 AND status != 'ignored'").fetchall():
+    for t in con.execute("SELECT * FROM transactions WHERE amount > 0 AND status != 'ignored' ORDER BY date").fetchall():
         if t["id"] in taken:
             continue
-        hay = f"{t['merchant'] or ''} {t['text']}"
-        for ten in tenancies:
-            s = date.fromisoformat(ten["start"]) - timedelta(days=31)
-            e = (date.fromisoformat(ten["end"]) if ten["end"] else date(2999, 1, 1)) + timedelta(days=31)
-            if not (s.isoformat() <= t["date"] <= e.isoformat()) or not _kw_match(ten["match_text"], hay):
-                continue
-            exp = (ten["rent"] or 0) + (ten["akonto"] or 0)
-            amt = t["amount"]
-            ak = ten["akonto"] or 0
-            akonto_part = ak if exp and abs(amt - exp) < 0.01 else rx.r2(amt * ak / exp) if exp else 0
-            con.execute("INSERT INTO rent_payments(tx_id, tenancy_id, month, rent_part, akonto_part, auto) VALUES (?, ?, ?, ?, ?, 1)",
-                        (t["id"], ten["id"], _rent_month(t["date"]), rx.r2(amt - akonto_part), akonto_part))
-            n += 1
-            break
+        ten = next((x for x in tenancies.values() if _rent_auto_ok(t, x)), None)
+        if not ten:
+            continue
+        rent_part, akonto_part = _rent_parts(t["amount"], ten)
+        con.execute("INSERT INTO rent_payments(tx_id, tenancy_id, month, rent_part, akonto_part, auto) VALUES (?, ?, ?, ?, ?, 1)",
+                    (t["id"], ten["id"], _rent_month(t["date"]), rent_part, akonto_part))
+        n += 1
     return n
 
 
@@ -778,11 +804,20 @@ def rent_overview(pid: int, year: int):
                 arrears += due - paid
             rows.append({"month": m, "due": due, "paid": paid,
                          "payments": [{"tx_id": x["tx_id"], "date": x["date"], "amount": x["amount"], "auto": x["auto"]} for x in mp]})
-        out.append({"tenancy": ten, "unit_name": unit_name.get(ten["unit_id"]), "months": rows,
+        bookings = sorted(({"tx_id": x["tx_id"], "date": x["date"], "month": x["month"], "amount": x["amount"], "auto": x["auto"],
+                            "text": f"{x['merchant'] or ''} {x['text']}".strip()[:140]}
+                           for x in pays if x["tenancy_id"] == ten["id"] and x["month"] in months), key=lambda x: x["date"], reverse=True)
+        out.append({"tenancy": ten, "unit_name": unit_name.get(ten["unit_id"]), "months": rows, "bookings": bookings,
                     "due_total": rx.r2(sum(r["due"] for r in rows)), "paid_total": rx.r2(sum(r["paid"] for r in rows)),
                     "arrears": rx.r2(arrears)})
-    return {"months": months, "tenancies": out,
-            "unassigned_credits": [c for c in credits if c["id"] not in taken][:60]}
+    open_credits = [c for c in credits if c["id"] not in taken][:60]
+    for c in open_credits:    # Vorschlag: Betrag passt zu einem Mietverhältnis (Stichwort fehlt oder passt nicht)
+        hay = f"{c['merchant'] or ''} {c['text']}"
+        fit = [t for t in p["tenancies"] if _in_tenancy(c["date"], t) and _rent_fits(c["amount"], t)]
+        if fit:
+            kw = [t for t in fit if t.get("match_text") and _kw_match(t["match_text"], hay)]
+            c["suggest"] = (kw or fit)[0]["id"]
+    return {"months": months, "tenancies": out, "unassigned_credits": open_credits}
 
 
 @router.post("/api/rent-payments")
@@ -793,11 +828,9 @@ def assign_rent(body: dict = Body(...)):
         ten = con.execute("SELECT * FROM tenancies WHERE id = ?", (ten_id,)).fetchone()
         if not t or not ten:
             raise HTTPException(404)
-        exp = (ten["rent"] or 0) + (ten["akonto"] or 0)
-        ak = ten["akonto"] or 0
-        akonto_part = ak if exp and abs(t["amount"] - exp) < 0.01 else rx.r2(t["amount"] * ak / exp) if exp else 0
+        rent_part, akonto_part = _rent_parts(t["amount"], ten)
         con.execute("INSERT OR REPLACE INTO rent_payments(tx_id, tenancy_id, month, rent_part, akonto_part, auto) VALUES (?, ?, ?, ?, ?, 0)",
-                    (tx_id, ten_id, month or _rent_month(t["date"]), rx.r2(t["amount"] - akonto_part), akonto_part))
+                    (tx_id, ten_id, month or _rent_month(t["date"]), rent_part, akonto_part))
     return {"ok": True}
 
 
