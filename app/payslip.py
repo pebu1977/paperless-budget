@@ -4,6 +4,7 @@ Schweizer Lohnabrechnungen sind sehr unterschiedlich aufgebaut (Lohnprogramm des
 Der Leser arbeitet deshalb zeilenweise über Stichworte:
   Bruttolohn …  7'400.00      AHV-Beitrag … -371.00      Nettolohn … 6'800.00      Ausbezahlter Lohn … 6'800.00
 Abzüge = negative Beträge zwischen Brutto und Auszahlung (Totalzeilen ausgenommen).
+Sonderzahlungen (13. Monatslohn, Bonus, Gratifikation, Prämie …) = Lohnarten vor dem Bruttolohn, einzeln gemerkt.
 """
 from __future__ import annotations
 
@@ -26,6 +27,9 @@ NET_RE = re.compile(r"^\W*(total\s+)?netto(lohn|gehalt|salär)?\b|^\W*nettolohn"
 PAYOUT_RE = re.compile(r"ausbezahlt|auszahlung|zahlbetrag|überweisung|ueberweisung|zu ihren gunsten|gutschrift bank", re.I)
 CHILD_RE = re.compile(r"kinder|ausbildungszulage|familienzulage", re.I)
 TOTAL_RE = re.compile(r"^\W*total\b", re.I)
+THIRTEEN_RE = re.compile(r"\b13\.?\s*(?:monats)?(?:lohn|gehalt|sal[äa]r|ml)\b|13\.\s*monat|dreizehnte", re.I)
+BONUS_RE = re.compile(r"bonus|gratifikation|erfolgs(?:beteiligung|prämie)|sonderzahlung|leistungsprämie|treueprämie|"
+                      r"dienstalter|jubiläum|jubilaeum|provision|einmalzahlung|weihnachtsgeld|(?<!kranken)(?<!kassen)prämie", re.I)
 KINDS = [("ahv", re.compile(r"\bahv|\biv\b|\beo\b", re.I)), ("alv", re.compile(r"\balv", re.I)),
          ("bvg", re.compile(r"\bpk\b|bvg|pensionskasse|vorsorge", re.I)),
          ("tax", re.compile(r"quellensteuer", re.I)),
@@ -41,6 +45,7 @@ class Payslip:
     payout: Optional[float]
     child_allowance: float = 0.0
     deductions: list = field(default_factory=list)   # [{"label", "amount", "kind"}] – Beträge positiv
+    extras: list = field(default_factory=list)       # Sonderzahlungen [{"label", "amount", "kind": "13"|"bonus"}] (brutto)
     employer: Optional[str] = None
 
     @property
@@ -58,8 +63,9 @@ def _amounts(line: str) -> list[float]:
 
 
 def _label(line: str) -> str:
-    m = re.search(r"[-–~]?\s?\d", line)
+    m = AMT_RE.search(line)                       # Bezeichnung = Text vor dem ersten Betrag („13. Monatslohn 7'400.00“)
     lbl = line[:m.start()] if m else line
+    lbl = re.sub(r"\s+[-–~]?\d+(?:[.,]\d+)?\s*%?\s*$", "", lbl)   # Satz am Ende („AHV 5.3%“) weg
     return re.sub(r"\s{2,}", " ", lbl).strip(" :|-–~")
 
 
@@ -88,6 +94,7 @@ def parse_payslip(text: str) -> Payslip:
     gross = net = payout = None
     child = 0.0
     deductions: list = []
+    extras: list = []
     phase = 0          # 0 vor Brutto, 1 Abzüge, 2 nach Netto
     for idx, raw in enumerate(lines):
         line = raw.strip()
@@ -109,6 +116,9 @@ def parse_payslip(text: str) -> Payslip:
             if vals:
                 payout = abs(vals[0] if not am else am[-1])
             continue
+        if phase == 0 and am and am[-1] > 0 and (THIRTEEN_RE.search(lbl) or BONUS_RE.search(lbl)):
+            extras.append({"label": lbl[:60], "amount": round(am[-1], 2), "kind": "13" if THIRTEEN_RE.search(lbl) else "bonus"})
+            continue
         if CHILD_RE.search(lbl) and am and not child and phase == 0:
             child = abs(am[-1])
             continue
@@ -117,4 +127,4 @@ def parse_payslip(text: str) -> Payslip:
             deductions.append({"label": lbl[:60] or "Abzug", "amount": round(abs(am[-1]), 2), "kind": kind})
     if payout is None:
         payout = net
-    return Payslip(month, person, gross, net, payout, child, deductions)
+    return Payslip(month, person, gross, net, payout, child, deductions, extras)

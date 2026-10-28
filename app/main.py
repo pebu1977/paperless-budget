@@ -346,13 +346,15 @@ def migrate_db():
     """Spalten nachrüsten, die in älteren Versionen fehlen."""
     wanted = {"transactions": {"card": "TEXT", "vehicle_id": "INTEGER", "merchant": "TEXT"}, "rules": {"vehicle_id": "INTEGER"},
               "vehicles": {"km_source": "TEXT", "plates": "TEXT"}, "parking_entries": {"end_time": "TEXT", "driver": "TEXT"},
-              "traccar_day_km": {"failed": "INTEGER"}}
+              "traccar_day_km": {"failed": "INTEGER"}, "payslips": {"extras": "TEXT"}}
     with db() as con:
         for table, cols in wanted.items():
             have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
             for col, typ in cols.items():
                 if col not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                    if (table, col) == ("payslips", "extras"):   # Sonderzahlungen neu erkennen: Abrechnungen neu einlesen
+                        con.execute("UPDATE payslips SET parsed_at = NULL")
 
 
 migrate_db()
@@ -726,8 +728,21 @@ def income_rule_for(t: dict, rules: list[dict]) -> Optional[dict]:
 
 
 def _payslips_ok() -> list[dict]:
+    """Erkannte Lohnabrechnungen; „regular“ = Auszahlung ohne Sonderzahlungen (13. Monatslohn, Bonus) – für Erwartungen."""
     with db() as con:
-        return [dict(r) for r in con.execute("SELECT * FROM payslips WHERE ok = 1 AND payout IS NOT NULL ORDER BY date")]
+        rows = [dict(r) for r in con.execute("SELECT * FROM payslips WHERE ok = 1 AND payout IS NOT NULL ORDER BY date")]
+    for r in rows:
+        r["extras"] = json.loads(r.get("extras") or "[]")
+        extra = sum(x["amount"] for x in r["extras"])
+        ratio = (r["payout"] / r["gross"]) if r["gross"] else 1
+        r["regular"] = round(max(0.0, r["payout"] - extra * ratio), 2) if extra else r["payout"]
+    return rows
+
+
+def _extras_label(ps: dict) -> str:
+    kinds = {x["kind"] for x in ps.get("extras") or []}
+    parts = (["13. Monatslohn"] if "13" in kinds else []) + (["Bonus/Prämie"] if "bonus" in kinds else [])
+    return f" + {' + '.join(parts)}" if parts else ""
 
 
 def match_payslips(payslips: list[dict], credits: list[dict]) -> dict[int, dict]:
@@ -780,11 +795,13 @@ def bank_incomes(start: date, end: date) -> list[dict]:
     for ps in payslips:
         t = pairs.get(ps["doc_id"])
         if t and s <= t["date"] < e:
-            out.append({"id": f"tx{t['id']}", "tx_id": t["id"], "description": _ps_label(ps), "amount": t["amount"], "date": t["date"],
+            out.append({"id": f"tx{t['id']}", "tx_id": t["id"], "description": _ps_label(ps) + _extras_label(ps), "amount": t["amount"],
+                        "date": t["date"], "regular": ps["regular"],
                         "source": "bank", "payslip_id": ps["doc_id"], "employer": ps["employer"], "recurring": 0,
                         "detail": f"{ps['employer'] or ''} · Lohnabrechnung {ps['month'] or ''}"})
         elif not t and ps["date"] and s <= ps["date"] < e:
-            out.append({"id": f"ps{ps['doc_id']}", "description": _ps_label(ps), "amount": ps["payout"], "date": ps["date"],
+            out.append({"id": f"ps{ps['doc_id']}", "description": _ps_label(ps) + _extras_label(ps), "amount": ps["payout"], "date": ps["date"],
+                        "regular": ps["regular"],
                         "source": "Lohnabrechnung", "payslip_id": ps["doc_id"], "employer": ps["employer"], "recurring": 0,
                         "detail": f"{ps['employer'] or ''} · noch keine Gutschrift gefunden"})
     for t in credits:
@@ -792,15 +809,30 @@ def bank_incomes(start: date, end: date) -> list[dict]:
             continue
         r = income_rule_for(t, rules)
         if r:
-            out.append({"id": f"tx{t['id']}", "tx_id": t["id"], "description": r["label"], "amount": t["amount"], "date": t["date"],
-                        "source": "bank", "rule_id": r["id"], "recurring": 0, "detail": t["merchant"] or t["text"][:60]})
+            # deutlich kleiner als der erwartete Lohn: separate Sonderzahlung (Bonus, 13. Monatslohn), ersetzt den Lohn nicht
+            extra = bool(r["expected"]) and t["amount"] < 0.7 * r["expected"]
+            hint = re.search(r"13\.?\s*(monats)?lohn|bonus|gratifikation|pr[äa]mie", f"{t['merchant'] or ''} {t['text']}", re.I)
+            out.append({"id": f"tx{t['id']}", "tx_id": t["id"], "description": r["label"] + (" (Sonderzahlung)" if extra or hint else ""),
+                        "amount": t["amount"], "date": t["date"], "source": "bank", "rule_id": r["id"], "recurring": 0,
+                        "extra": extra, "detail": t["merchant"] or t["text"][:60]})
 
     def ps_text(ps):
         t = pairs.get(ps["doc_id"])
         return f"{ps['employer'] or ''} {ps['person'] or ''} {ps['title'] or ''} {(t or {}).get('merchant') or ''} {(t or {}).get('text') or ''}"
 
+    # gelernte Zuordnung Regel ↔ Arbeitgeber/Person: Gutschriften der Regel, die zu einer Lohnabrechnung passten
+    with db() as con:
+        all_credits = [dict(r) for r in con.execute(
+            "SELECT id, date, amount, merchant, text FROM transactions WHERE amount > 0 AND status != 'ignored'")]
+    learned: dict[int, set] = {}
+    for doc_id, t in match_payslips(payslips, all_credits).items():
+        r = income_rule_for(t, rules)
+        ps = next((x for x in payslips if x["doc_id"] == doc_id), None)
+        if r and ps:
+            learned.setdefault(r["id"], set()).add(ps["employer"] or ps["person"])
+
     def linked(ps, r):
-        return _kw(r["keyword"], ps_text(ps))
+        return _kw(r["keyword"], ps_text(ps)) or (ps["employer"] or ps["person"]) in learned.get(r["id"], set())
 
     this_month = date.today().replace(day=1)
     m = date(start.year, start.month, 1)
@@ -809,11 +841,18 @@ def bank_incomes(start: date, end: date) -> list[dict]:
             mk = m.strftime("%Y-%m")
             in_month = [x for x in out if x["date"][:7] == mk]
             covered_employers = {x.get("employer") for x in in_month if x.get("employer")}
+            used_ps: set = set()     # Lohnabrechnungen dieses Monats, die schon eine Regel abdecken
             for r in rules:
                 lp = [ps for ps in payslips if linked(ps, r)]
-                exp = r["expected"] if r["expected"] else (lp[-1]["payout"] if lp else None)
-                has = any(x.get("rule_id") == r["id"] for x in in_month) or any(
-                    x.get("payslip_id") and any(ps["doc_id"] == x["payslip_id"] for ps in lp) for x in in_month)
+                exp = r["expected"] if r["expected"] else (next((x["regular"] for x in reversed(lp) if not x["extras"]), lp[-1]["regular"]) if lp else None)
+                hit = next((x for x in in_month if x.get("payslip_id") and x["payslip_id"] not in used_ps
+                            and any(ps["doc_id"] == x["payslip_id"] for ps in lp)), None)
+                if not hit and exp:   # ohne gelernte Zuordnung: Lohnabrechnung mit ähnlichem Betrag (±5 %) zählt als Eingang
+                    hit = next((x for x in in_month if x.get("payslip_id") and x["payslip_id"] not in used_ps
+                                and abs(x.get("regular", x["amount"]) - exp) <= 0.05 * exp), None)
+                if hit:
+                    used_ps.add(hit["payslip_id"])
+                has = any(x.get("rule_id") == r["id"] and not x.get("extra") for x in in_month) or bool(hit)
                 if exp and not has:
                     day = int(r["day"] or (int(lp[-1]["date"][8:10]) if lp else 25))
                     out.append({"id": f"exp{r['id']}-{m:%Y%m}", "description": r["label"], "amount": exp,
@@ -824,7 +863,9 @@ def bank_incomes(start: date, end: date) -> list[dict]:
             # Arbeitgeber mit Lohnabrechnungen, aber ohne Regel: letzte Abrechnung als Erwartung (wenn nicht älter als 2 Monate)
             last_by_emp: dict = {}
             for ps in payslips:
-                last_by_emp[ps["employer"] or ps["person"]] = ps
+                key = ps["employer"] or ps["person"]
+                if not ps["extras"] or key not in last_by_emp:   # Erwartung nach der letzten normalen Abrechnung
+                    last_by_emp[key] = ps
             for emp, ps in last_by_emp.items():
                 if emp in covered_employers or any(linked(ps, r) for r in rules) or not ps["month"]:
                     continue
@@ -832,7 +873,7 @@ def bank_incomes(start: date, end: date) -> list[dict]:
                     continue
                 if ps["month"] >= mk:
                     continue
-                out.append({"id": f"expps{ps['doc_id']}-{m:%Y%m}", "description": _ps_label(ps), "amount": ps["payout"],
+                out.append({"id": f"expps{ps['doc_id']}-{m:%Y%m}", "description": _ps_label(ps), "amount": ps["regular"],
                             "date": date(m.year, m.month, min(int((ps["date"] or "2000-01-25")[8:10]), 28)).isoformat(),
                             "source": "erwartet", "employer": ps["employer"], "recurring": 0,
                             "detail": f"wie letzte Lohnabrechnung {ps['month']}"})
@@ -901,10 +942,15 @@ async def parse_payslip_one(doc_id: int) -> dict:
     employer = corr.get(doc.get("correspondent")) or next((l.strip() for l in (doc.get("content") or "").splitlines() if l.strip()), None)
     month = ps.month or (created[:7] if created else None)
     with db() as con:
+        old = con.execute("SELECT ok FROM payslips WHERE doc_id = ?", (doc_id,)).fetchone()
+        if old and old["ok"] and not ps.ok:   # von Hand ergänzte Werte nicht überschreiben
+            con.execute("UPDATE payslips SET parsed_at = ? WHERE doc_id = ?", (datetime.now().isoformat(timespec="seconds"), doc_id))
+            return {"doc_id": doc_id, "title": doc.get("title"), "ok": True, "month": month, "person": ps.person, "payout": ps.payout}
         con.execute("INSERT OR REPLACE INTO payslips(doc_id, title, date, employer, person, month, gross, net, payout, child_allowance, "
-                    "deductions, ok, parsed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "deductions, ok, parsed_at, extras) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (doc_id, doc.get("title"), created, employer, ps.person, month, ps.gross, ps.net, ps.payout, ps.child_allowance,
-                     json.dumps(ps.deductions, ensure_ascii=False), int(ps.ok), datetime.now().isoformat(timespec="seconds")))
+                     json.dumps(ps.deductions, ensure_ascii=False), int(ps.ok), datetime.now().isoformat(timespec="seconds"),
+                     json.dumps(ps.extras, ensure_ascii=False)))
     _payslip_cache["t"] = 0
     return {"doc_id": doc_id, "title": doc.get("title"), "ok": ps.ok, "month": month, "person": ps.person, "payout": ps.payout}
 
@@ -953,6 +999,7 @@ def list_payslips(year: int):
     persons: dict = {}
     for r in rows:
         r["deductions"] = json.loads(r["deductions"] or "[]")
+        r["extras"] = json.loads(r.get("extras") or "[]")
         r["deductions_total"] = round(sum(d["amount"] for d in r["deductions"]), 2)
         t = pairs.get(r["doc_id"])
         r["bank"] = {"id": t["id"], "date": t["date"]} if t else None
@@ -961,11 +1008,12 @@ def list_payslips(year: int):
             continue
         key = r["person"] or r["employer"] or "?"
         p = persons.setdefault(key, {"person": key, "employers": set(), "count": 0, "gross": 0.0, "net": 0.0, "payout": 0.0,
-                                     "child_allowance": 0.0, **{k: 0.0 for k in kinds}})
+                                     "child_allowance": 0.0, "extras": 0.0, **{k: 0.0 for k in kinds}})
         p["employers"].add(r["employer"] or "")
         p["count"] += 1
         for f in ("gross", "net", "payout", "child_allowance"):
             p[f] += r[f] or 0
+        p["extras"] += sum(x["amount"] for x in r["extras"])
         for d in r["deductions"]:
             p[d["kind"] if d["kind"] in kinds else "other"] += d["amount"]
     totals = []

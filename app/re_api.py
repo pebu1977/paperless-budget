@@ -1,6 +1,8 @@
 """API: Liegenschaften (Nebenkosten, Mietzinseingänge) und Projekte."""
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import os
 import re
@@ -16,6 +18,7 @@ from . import main as core
 from . import realestate as rx
 
 router = APIRouter()
+log = logging.getLogger("paperless-budget")
 
 with core.db() as _con:
     _con.executescript(
@@ -480,7 +483,11 @@ def _meters_nk(p: dict, p0: date, p1: date) -> list[dict]:
         meters = [dict(r) for r in con.execute("SELECT * FROM meters WHERE property_id = ? AND unit_id IS NULL AND active = 1", (p["id"],))]
     out = []
     for m in meters:
-        c = mt.consumption(m, p0, p1)
+        try:
+            c = mt.consumption(m, p0, p1)
+        except Exception as e:   # ein Zähler darf die Abrechnung nie verhindern
+            log.warning("Zähler %s: %s", m.get("name"), e)
+            continue
         cid = m.get("nk_category_id")
         if not cid and m["kind"] == "strom":   # ohne Angabe: Kategorie mit „Strom“ im Namen
             cid = next((x["id"] for x in p["categories"] if "strom" in x["name"].lower()), None)
@@ -731,8 +738,11 @@ def _rent_fits(amount: float, ten: dict) -> bool:
 
 
 def _in_tenancy(d: str, ten: dict) -> bool:
-    s = date.fromisoformat(ten["start"]) - timedelta(days=31)
-    e = (date.fromisoformat(ten["end"]) if ten["end"] else date(2999, 1, 1)) + timedelta(days=31)
+    try:
+        s = date.fromisoformat(ten["start"]) - timedelta(days=31)
+        e = (date.fromisoformat(ten["end"]) if ten.get("end") else date(2999, 1, 1)) + timedelta(days=31)
+    except (TypeError, ValueError):
+        return False
     return s.isoformat() <= d <= e.isoformat()
 
 

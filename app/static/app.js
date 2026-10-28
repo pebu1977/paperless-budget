@@ -473,11 +473,12 @@ async function drawPayslips() {
   const d = await api(`/api/payslips?year=${year}`);
   const k = (label, v) => v ? `<div><span class="muted small">${label}</span><b class="num">${fmt(v)}</b></div>` : "";
   $("#psTotals").innerHTML = d.totals.map((p) => `<div class="ps-card"><div class="ps-head"><b>${esc(p.person)}</b> <span class="muted small">${esc(p.employers.join(", "))} · ${p.count} Abrechnung(en) ${year}</span></div>
-      <div class="ps-grid">${k("Brutto", p.gross)}${k("davon Kinderzulagen", p.child_allowance)}${k("AHV/IV/EO", p.ahv)}${k("ALV", p.alv)}${k("Pensionskasse", p.bvg)}
+      <div class="ps-grid">${k("Brutto", p.gross)}${k("davon 13. ML / Bonus", p.extras)}${k("davon Kinderzulagen", p.child_allowance)}${k("AHV/IV/EO", p.ahv)}${k("ALV", p.alv)}${k("Pensionskasse", p.bvg)}
       ${k("Versicherungen", p.insurance)}${k("Quellensteuer", p.tax)}${k("übrige Abzüge", p.other)}${k("Netto", p.net)}${k("ausbezahlt", p.payout)}</div></div>`).join("");
   $("#psBody").innerHTML = d.payslips.length ? d.payslips.map((r) => r.ok ? `<tr>
       <td>${esc(r.month || "")}</td>
       <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.person || "–")}</a> <span class="muted small">· ${esc(r.employer || "")}</span>
+        ${r.extras.map((x) => `<span class="pill" title="${esc(x.label)}">${x.kind === "13" ? "13. Monatslohn" : "Bonus/Prämie"} ${fmt(x.amount)}</span>`).join(" ")}
         ${r.deductions.length ? `<div class="it-sub" title="${esc(r.deductions.map((x) => `${x.label}: ${x.amount.toFixed(2)}`).join("\n"))}">${esc(r.deductions.map((x) => x.label).slice(0, 4).join(", "))}${r.deductions.length > 4 ? " …" : ""}</div>` : ""}</td>
       <td class="num">${fmt(r.gross)}</td><td class="num">${r.deductions_total ? "− " + fmtPos(r.deductions_total) : "–"}</td><td class="num">${fmt(r.net || 0)}</td>
       <td class="num"><b>${fmt(r.payout)}</b></td>
