@@ -237,10 +237,10 @@ async function reRent(p) {
     <p class="muted small">Automatisch nur, wenn das Stichwort (${t.tenancy.match_text ? `„${esc(t.tenancy.match_text)}“` : "<b>keins erfasst</b> – unter Einrichtung → Mietverhältnis"}) im Buchungstext steht
       <b>und</b> der Betrag zur Monatsmiete von ${fmt(t.tenancy.rent + t.tenancy.akonto)} passt (oder einem Vielfachen).
       ${(t.tenancy.match_text || "").split(",").length > 2 ? `<br><b>Hinweis:</b> Komma heisst „oder“ – jedes Wort zwischen den Kommas genügt allein. Am besten nur den Nachnamen eintragen (z.B. „${esc(t.tenancy.match_text.split(",")[0].trim())}“).` : ""}</p>
-    ${t.bookings.length ? `<table class="tbl small"><thead><tr><th>Eingang</th><th>für Monat</th><th class="num">Betrag</th><th>Buchungstext</th><th></th><th></th></tr></thead><tbody>
+    ${t.bookings.length ? `<table class="tbl small"><thead><tr><th>Eingang</th><th>für Monat (ab)</th><th class="num">Betrag</th><th>Buchungstext</th><th></th><th></th></tr></thead><tbody>
       ${t.bookings.map((b) => `<tr data-tx="${b.tx_id}" data-ten="${t.tenancy.id}"><td>${fmtDate(b.date)}</td>
         <td><select class="rp-month">${r.months.map((m) => `<option value="${m}" ${m === b.month ? "selected" : ""}>${mlabel(m)}</option>`).join("")}</select></td>
-        <td class="num">${fmt(b.amount)}</td><td class="muted">${esc(b.text)}</td><td><span class="pill ${b.auto ? "" : "grey"}">${b.auto ? "automatisch" : "von Hand"}</span></td>
+        <td class="num">${fmt(b.amount)}${b.n_months > 1 ? `<br><span class="muted small">${b.n_months} Monatsmieten</span>` : ""}</td><td class="muted">${esc(b.text)}</td><td><span class="pill ${b.auto ? "" : "grey"}">${b.auto ? "automatisch" : "von Hand"}</span></td>
         <td><button class="linkbtn danger rp-del" title="Keine Mietzahlung – wird nicht mehr automatisch zugeordnet">entfernen</button></td></tr>`).join("")}
     </tbody></table>` : `<div class="empty">Noch keine Zahlungen erkannt.</div>`}</div>`).join("")}
   <div class="card"><h3>Nicht zugeordnete Gutschriften</h3>

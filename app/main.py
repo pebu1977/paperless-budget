@@ -346,7 +346,8 @@ def migrate_db():
     """Spalten nachrüsten, die in älteren Versionen fehlen."""
     wanted = {"transactions": {"card": "TEXT", "vehicle_id": "INTEGER", "merchant": "TEXT"}, "rules": {"vehicle_id": "INTEGER"},
               "vehicles": {"km_source": "TEXT", "plates": "TEXT"}, "parking_entries": {"end_time": "TEXT", "driver": "TEXT"},
-              "traccar_day_km": {"failed": "INTEGER"}, "payslips": {"extras": "TEXT"}}
+              "traccar_day_km": {"failed": "INTEGER"}, "payslips": {"extras": "TEXT"},
+              "rent_payments": {"n_months": "INTEGER"}}
     with db() as con:
         for table, cols in wanted.items():
             have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -1589,6 +1590,9 @@ async def parse_one(doc_id: int) -> dict:
                 "AND (sign_source = 'beleg' OR ? = 'beleg') LIMIT 1",
                 (doc_id, b.amount, (d0 - timedelta(days=4)).isoformat(), (d0 + timedelta(days=4)).isoformat(), b.sign_source)).fetchone()
             if dup and b.hash not in existing:
+                # Text des anderen Belegs ergänzen (z.B. Adresse des Zahlers aus der Gutschriftsanzeige) – für Stichworte
+                con.execute("UPDATE transactions SET text = substr(text || ' · ' || ?, 1, 600) WHERE id = ? AND instr(lower(text), lower(?)) = 0",
+                            (b.text, dup["id"], b.text))
                 continue
             cur = con.execute(
                 "INSERT OR IGNORE INTO transactions(statement_doc_id, hash, date, text, amount, sign_source, merchant, card) "
