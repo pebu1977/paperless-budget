@@ -513,6 +513,10 @@ def exclusion(doc_id: int, tags: list[int], flags: dict, settings: dict, tag_nam
     hit = next((t for t in settings.get("exclude_tag_ids") or [] if t in tags), None)
     if hit is not None:
         return True, tag_names.get(hit, "Tag"), "tag"
+    # Kontoauszüge sind keine Ausgabe – ihre Buchungen kommen über den Abgleich
+    if (doc_type and doc_type in (settings.get("statement_document_type_ids") or [])) or \
+            set(tags) & set(settings.get("statement_tag_ids") or []):
+        return True, "Kontoauszug", "tag"
     # Bestellbestätigungen sind nur vorgemerkt – gezählt wird später die Rechnung bzw. Abbuchung
     if (doc_type and doc_type in (settings.get("payslip_document_type_ids") or [])) or \
             set(tags) & set(settings.get("payslip_tag_ids") or []) or doc_id in payslip_ids():
