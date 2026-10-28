@@ -473,6 +473,23 @@ def _oil(p: dict, p0: date, p1: date, lines: list[dict]) -> tuple[list[dict], Op
     return rest, info
 
 
+def _meters_nk(p: dict, p0: date, p1: date) -> list[dict]:
+    """Allgemein-Zähler des Hauses (ohne Wohnung): Verbrauch der Periode × Tarif als Hinweis „erwartet“ – ersetzt nichts."""
+    from . import meters_api as mt   # spät importieren (meters_api -> contracts_api -> re_api)
+    with core.db() as con:
+        meters = [dict(r) for r in con.execute("SELECT * FROM meters WHERE property_id = ? AND unit_id IS NULL AND active = 1", (p["id"],))]
+    out = []
+    for m in meters:
+        c = mt.consumption(m, p0, p1)
+        cid = m.get("nk_category_id")
+        if not cid and m["kind"] == "strom":   # ohne Angabe: Kategorie mit „Strom“ im Namen
+            cid = next((x["id"] for x in p["categories"] if "strom" in x["name"].lower()), None)
+        cat = next((x for x in p["categories"] if x["id"] == cid), None)
+        c.update(category_id=cid, category=cat["name"] if cat else None, grp=cat["grp"] if cat else None)
+        out.append(c)
+    return out
+
+
 async def _statement(pid: int, year: int, tenancy_id: Optional[int], unit_id: Optional[int], akonto: Optional[float],
                      period_from: Optional[str] = None, period_to: Optional[str] = None):
     interim = bool(period_from or period_to)
@@ -484,6 +501,7 @@ async def _statement(pid: int, year: int, tenancy_id: Optional[int], unit_id: Op
             raise HTTPException(400, "Ende liegt vor dem Beginn")
     p, (p0, p1), lines = await property_costs(pid, year, period)
     lines, oil = _oil(p, p0, p1, lines)
+    meters = _meters_nk(p, p0, p1)
     tenancy = next((t for t in p["tenancies"] if t["id"] == tenancy_id), None) if tenancy_id else None
     uid = tenancy["unit_id"] if tenancy else unit_id
     if not uid or not any(u["id"] == uid for u in p["units"]):
@@ -499,7 +517,18 @@ async def _statement(pid: int, year: int, tenancy_id: Optional[int], unit_id: Op
     st = rx.compute_statement(units=units, keys=keys, categories=cats, costs=costs, unit_id=uid, period=(p0, p1),
                               stay=_stay(tenancy, p0, p1), room_pct=p["room_pct"] or 70, room_key_id=p["room_key_id"],
                               water_key_id=p["water_key_id"], akonto=used)
-    st.update({"akonto_received": received, "akonto_expected": expected, "interim": interim, "oil": oil,
+    for m in meters:     # erwartete Kosten laut Zähler in Klammern hinter die Kategorie
+        if m.get("amount") is None or not m.get("category"):
+            continue
+        tag = f" (erwartet {rx.chf(m['amount'])})"
+        for r in st["heating"]["rows"]:
+            if r["name"] == m["category"] and r["grp"] == m["grp"]:
+                r["name"] += tag
+        for g in st["groups"]:
+            for r in g["rows"]:
+                if g["name"] == m["grp"] and r["name"] == m["category"] and not r.get("direct"):
+                    r["name"] += tag
+    st.update({"akonto_received": received, "akonto_expected": expected, "interim": interim, "oil": oil, "meters": meters,
                "unassigned": [l for l in lines if not l["category_id"]], "tenancy": tenancy})
     return p, st
 

@@ -274,6 +274,10 @@ async function reStatement(p) {
       <div class="muted">${st.interim ? "<b>Zwischenabrechnung</b> · " : ""}${esc(st.unit.name)} · ${fmtDate(st.stay[0])} – ${fmtDate(st.stay[1])} · ${st.days} von ${st.days_total} Tagen</div>
       ${st.oil ? `<div class="muted small" style="margin-top:4px">🛢 Heizöl ${st.oil.complete ? `nach Verbrauch: ${fmtN(st.oil.liters)} Liter = ${fmt(st.oil.amount)} (Bestand ${fmtDate(st.oil.start.date)} → ${fmtDate(st.oil.end.date)})`
         : `<span class="neg">nach Einkauf – Tankstand-Ablesung ${!st.oil.start ? "zum Beginn" : "zum Ende"} der Periode fehlt (Einrichtung → Heizöl-Lagerbestand)</span>`}</div>` : ""}
+      ${(st.meters || []).map((m) => `<div class="muted small" style="margin-top:4px">⚡ Zähler ${esc(m.name)} (allgemein): ${m.quantity != null
+        ? `${fmtN(m.quantity)} ${esc(m.unit)} in der Periode${m.amount != null ? `, erwartet ca. <b>${fmt(m.amount)}</b>` : ""}
+           (Stand ${fmtDate(m.start[0].slice(0, 10))} → ${fmtDate(m.end[0].slice(0, 10))}${m.estimated ? ", Ende hochgerechnet" : ""})${m.category ? ` – steht in Klammern bei „${esc(m.category)}“` : " – keine NK-Kategorie zugeordnet (Zähler → Einstellungen)"}, abgerechnet wird nach Rechnungen`
+        : esc(m.missing)}</div>`).join("")}
       ${st.interim ? `<div class="muted small" style="margin-top:4px">Es zählen nur Kosten, die im Zeitraum verbucht sind (Jahresrechnungen, z.B. Wasser, fehlen evtl. noch).</div>` : ""}
       <table>
         ${h.total ? tr("Raumheizung", `${fmt(h.room_unit)} <span class="muted small">(${h.room_share_pct} % von ${fmt(h.room_total)})</span>`) + tr("Warmwasser", `${fmt(h.water_unit)} <span class="muted small">(${h.water_share_pct} % von ${fmt(h.water_total)})</span>`) : ""}

@@ -8,6 +8,7 @@ Bereiche (je Benutzer: none | view | edit):
   projects   Projekte
   contracts  Verträge, Kredite, Abos
   income     Einnahmen, Lohnregeln, Lohnabrechnungen
+  meters     Zähler, Ablesungen, Prognose
 Administratoren dürfen alles, inkl. Einstellungen, Benutzer, Backup.
 GET = ansehen, alle anderen Methoden = bearbeiten. Unbekannte Routen: nur Administratoren.
 """
@@ -20,7 +21,8 @@ import secrets
 from typing import Optional
 
 AREAS = [("budget", "Budget (Übersicht, Ausgaben, Erfassen)"), ("bank", "Abgleich / Kontoauszüge"), ("vehicles", "Fahrzeuge"),
-         ("realestate", "Immobilien"), ("projects", "Projekte"), ("contracts", "Verträge & Abos"), ("income", "Einnahmen & Lohn")]
+         ("realestate", "Immobilien"), ("projects", "Projekte"), ("contracts", "Verträge & Abos"), ("income", "Einnahmen & Lohn"),
+         ("meters", "Zähler & Energie")]
 AREA_KEYS = [a for a, _ in AREAS]
 LEVEL = {"none": 0, "view": 1, "edit": 2}
 
@@ -68,6 +70,7 @@ RULES: list[tuple[str, object]] = [
     (r"^/api/(projects-overview|projects)(/|$)", "projects"),
     (r"^/api/(contracts-overview|contracts|contract-payments|abo-suggestions)(/|$)", "contracts"),
     (r"^/api/(incomes|income-rules|income-credits|payslip-docs|payslips)(/|$)", "income"),
+    (r"^/api/meters(/|$)", "meters"),
     (r"^/api/(properties-full|properties|nk-statements|files|rent-payments)(/|$)", "realestate"),
     (r"^/api/re/keys/", "realestate"),
     (r"^/api/re/", "re-ent"),
