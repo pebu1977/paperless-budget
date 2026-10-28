@@ -41,7 +41,7 @@ NOISE_RE = re.compile(
     re.I,
 )
 CARD_RE = re.compile(r"\s*(kartennummer|kartennr)\s*:.*$", re.I)
-# Kartennummer (letzte 4 Ziffern) für Regeln, z.B. "Tankomat + 1234"
+# Kartennummer (letzte 4 Ziffern) für Regeln, z.B. "Tankomat + 2877"
 CARDNUM_RE = re.compile(r"(kartennummer|kartennr|karten nr\.)\s*:?\s*(?:[\dX*]*(\d{4})(?:-\d)?\b)?", re.I)
 CARD_ONLY_RE = re.compile(r"^\s*[\dX*]*(\d{4})(?:-\d)?\s*$")
 CREDIT_RE = re.compile(
@@ -242,7 +242,7 @@ def parse_statement(content: str, doc_id: int = 0) -> list[Booking]:
         if cur is None:
             continue
         text = CARD_RE.sub("", line).strip()
-        # Layout B: Saldo steht teils am Ende einer Folgezeile ("5000 Aarau 487.07")
+        # Layout B: Saldo steht teils am Ende einer Folgezeile ("5737 Menziken 487.07")
         if layout == "B" and cur.saldo is None and saldo is not None and group:
             t = TRAIL_AMT_RE.match(text)
             if t:
@@ -314,14 +314,8 @@ def candidates(tx: dict, invoices: list[dict], corr_names: dict, window_days: in
     return out
 
 
-def is_unique(cands: list[dict], gap_days: int = 20) -> bool:
-    """Für die automatische Zuordnung: Betrag UND Name passen, und der Treffer ist klar der beste.
-    Bei wiederkehrenden Rechnungen (Miete, Prämien, Abos) passen oft mehrere Monate – dann gewinnt die
-    zeitlich nächste, wenn die übernächste mindestens `gap_days` Tage weiter entfernt ist."""
+def is_unique(cands: list[dict]) -> bool:
+    """Für die automatische Zuordnung: genau ein Kandidat passt auch beim Namen, und er ist der beste.
+    Kandidaten nur mit gleichem Betrag bleiben Vorschläge zum manuellen Bestätigen."""
     hits = [c for c in cands if c["name_hit"]]
-    if not hits or not cands[0]["name_hit"]:
-        return False
-    if len(hits) == 1:
-        return True
-    hits = sorted(hits, key=lambda c: abs(c["days"]))
-    return hits[0] is cands[0] and abs(hits[1]["days"]) - abs(hits[0]["days"]) >= gap_days
+    return len(hits) == 1 and cands[0]["name_hit"]
