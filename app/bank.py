@@ -7,6 +7,8 @@ Getestet mit PostFinance, ZKB und Bank Zimmerberg. Zwei Layouts werden automatis
   B  "Datum Text Valuta Betrag [Saldo]"     (Bank Zimmerberg u.ä.)
   * Das Buchungsdatum gilt für Folgebuchungen ohne eigenes Datum weiter.
   * Folgezeilen gehören zum Buchungstext, auch über Seitenumbrüche (Seitenkopf wird übersprungen).
+  * Einzelbelege (Gutschrifts-/Belastungsanzeige, z.B. ZKB „Gutschrift … ZKB-Referenz Valuta Währung Betrag“)
+    ergeben genau eine Buchung (sign_source "beleg").
   * Der Saldo steht nur bei einzelnen Buchungen (in B teils in der Folgezeile). Zwischen zwei Saldi
     werden die Vorzeichen so bestimmt, dass die Summe exakt aufgeht – ausgehend von Stichworten.
 """
@@ -48,6 +50,13 @@ CREDIT_RE = re.compile(
     r"gutschrift|übertrag|überweisung von|eingang|einzahlung|lohn|gehalt|salär|rückerstattung|vergütung|retoure|storno",
     re.I,
 )
+
+
+ADVICE_KIND_RE = re.compile(r"^\s*(gutschrift|belastung|lastschrift|zahlungsausgang|zahlungseingang|vergütung|verguetung)\s*$", re.I)
+ADVICE_HEAD_RE = re.compile(r"\bvaluta\b.*\bbetrag\b", re.I)
+ADVICE_ROW_RE = re.compile(rf"^\s*(?:(?P<ref>\S+)\s+)?(?P<valuta>{DATE})\s+(?P<cur>[A-Z]{{3}})\s+(?P<amt>-?{AMT})\s*$")
+ADVICE_PARTY_RE = re.compile(r"^\s*(zahler|auftraggeber|begünstigter|beguenstigter|empfänger|empfaenger|zahlungsempfänger)\s*:?\s*(.*)$", re.I)
+ADVICE_MSG_RE = re.compile(r"^\s*(mitteilung|zahlungszweck|verwendungszweck)\s*:?\s*(.*)$", re.I)
 
 
 @dataclass
@@ -270,6 +279,45 @@ def parse_statement(content: str, doc_id: int = 0) -> list[Booking]:
         seen[base] = n + 1
         b.hash = hashlib.sha1(f"{base}|{n}".encode()).hexdigest()
     return bookings
+
+
+def parse_advice(content: str) -> list[Booking]:
+    """Einzelbeleg: Gutschrifts- oder Belastungsanzeige mit genau einer Buchung."""
+    lines = [l.strip() for l in (content or "").splitlines() if l.strip()]
+    kind = next((m.group(1).lower() for l in lines for m in [ADVICE_KIND_RE.match(l)] if m), None)
+    if not kind:
+        return []
+    row = None
+    for i, l in enumerate(lines):
+        if ADVICE_HEAD_RE.search(l):
+            row = next((ADVICE_ROW_RE.match(x) for x in lines[i + 1:i + 3] if ADVICE_ROW_RE.match(x)), None)
+            if row:
+                break
+    if not row or not _iso(row.group("valuta")):
+        return []
+    sign = 1 if kind in ("gutschrift", "zahlungseingang", "vergütung", "verguetung") else -1
+    party, msg = "", []
+    for i, l in enumerate(lines):
+        m = ADVICE_PARTY_RE.match(l)
+        if m and not party:
+            party = (m.group(2) or (lines[i + 1] if i + 1 < len(lines) else "")).strip()
+        m = ADVICE_MSG_RE.match(l)
+        if m:
+            msg.append((m.group(2) or (lines[i + 1] if i + 1 < len(lines) else "")).strip())
+    # "Nachname, Vorname, Strasse …" -> "Vorname Nachname" (wie im Kontoauszug üblich)
+    parts = [x.strip() for x in party.split(",")]
+    name = f"{parts[1]} {parts[0]}" if len(parts) >= 2 and parts[1] and not re.search(r"\d", parts[1]) else parts[0]
+    text = " · ".join(x for x in [kind.upper(), (("AUFTRAGGEBER: " if sign > 0 else "BEGÜNSTIGTER: ") + f"{name} ({party})") if party else "",
+                                  *[f"MITTEILUNG: {x}" for x in msg if x]] if x)
+    b = Booking(date=_iso(row.group("valuta")), text=text[:300], amount=round(sign * _num(row.group("amt")), 2), sign_source="beleg",
+                merchant=name[:80])
+    b.hash = hashlib.sha1(f"beleg|{b.date}|{abs(b.amount):.2f}|{(row.group('ref') or '').lower()}".encode()).hexdigest()
+    return [b]
+
+
+def parse_any(content: str, doc_id: int = 0) -> list[Booking]:
+    """Kontoauszug – oder, falls keine Buchungen gefunden werden, Einzelbeleg."""
+    return parse_statement(content, doc_id) or parse_advice(content)
 
 
 # ---------------------------------------------------------------- Abgleich

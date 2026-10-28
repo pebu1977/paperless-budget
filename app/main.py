@@ -1571,7 +1571,7 @@ async def list_statements():
 
 async def parse_one(doc_id: int) -> dict:
     doc = await pl_request("GET", f"/api/documents/{doc_id}/")
-    bookings = bank.parse_statement(doc.get("content") or "", doc_id)
+    bookings = bank.parse_any(doc.get("content") or "", doc_id)
     added = 0
     with db() as con:
         existing = {r["hash"]: dict(r) for r in con.execute("SELECT * FROM transactions WHERE statement_doc_id = ?", (doc_id,))}
@@ -1582,6 +1582,14 @@ async def parse_one(doc_id: int) -> dict:
                 con.execute("DELETE FROM transactions WHERE id = ?", (r["id"],))
         new_ids = []
         for b in bookings:
+            # Einzelbeleg (Gutschrifts-/Belastungsanzeige) und Kontoauszug zeigen dieselbe Buchung: nur einmal erfassen
+            d0 = date.fromisoformat(b.date)
+            dup = con.execute(
+                "SELECT id FROM transactions WHERE statement_doc_id != ? AND abs(amount - ?) < 0.005 AND date BETWEEN ? AND ? "
+                "AND (sign_source = 'beleg' OR ? = 'beleg') LIMIT 1",
+                (doc_id, b.amount, (d0 - timedelta(days=4)).isoformat(), (d0 + timedelta(days=4)).isoformat(), b.sign_source)).fetchone()
+            if dup and b.hash not in existing:
+                continue
             cur = con.execute(
                 "INSERT OR IGNORE INTO transactions(statement_doc_id, hash, date, text, amount, sign_source, merchant, card) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

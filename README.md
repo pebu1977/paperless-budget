@@ -221,6 +221,11 @@ Der Leser erkennt zwei verbreitete Layouts automatisch:
 |---|---|---|
 | A | `[Datum] Text Betrag Valuta [Saldo]` | PostFinance, Zürcher Kantonalbank |
 | B | `Datum Text Valuta Betrag [Saldo]` | Bank Zimmerberg |
+| Einzelbeleg | Gutschrifts-/Belastungsanzeige: `Referenz Valuta Währung Betrag` | Zürcher Kantonalbank |
+
+Einzelbelege (z.B. die ZKB-Gutschriftsanzeige einer Mietzahlung) werden wie ein Auszug mit einer Buchung behandelt –
+dafür den Dokumenttyp bzw. Tag dieser Belege ebenfalls unter *Einstellungen → Bank* als Kontoauszug wählen. Erscheint
+dieselbe Buchung später im Monatsauszug (gleicher Betrag, ±4 Tage), wird sie nicht doppelt erfasst.
 
 Andere Banken mit ähnlichem Aufbau funktionieren oft ebenfalls. Ob alles stimmt, sieht man sofort: Buchungen,
 deren Vorzeichen nicht über den Saldo bestätigt werden konnte, sind als „ungeprüft“ markiert.
