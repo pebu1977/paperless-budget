@@ -413,7 +413,7 @@ function reSetup(p) {
   <div class="card"><h3>Heizöl-Lagerbestand</h3>
     <p class="muted small">Optional: Heizöl nach <b>Verbrauch</b> abrechnen statt nach Einkauf – Anfangsbestand + Lieferungen − Endbestand.
       Dafür den Tankstand zu Beginn und Ende der Periode (bzw. am Stichtag einer Zwischenabrechnung) erfassen. <b>Lieferungen</b> mit Litern und
-      Betrag erfassen – daraus rechnet die App den Durchschnittspreis pro 100 l des Tankinhalts; bei Ablesungen ohne Preis gilt dieser.
+      Betrag erfassen – daraus rechnet die App den Durchschnittspreis pro 100 l des Tankinhalts und bewertet die Ablesungen damit. Einen Preis bei der Ablesung braucht es nur für den Anfangsbestand.
       Sind Lieferungen erfasst, ersetzen sie die Heizöl-Belege in der Abrechnung.</p>
     <div class="field"><div class="lbl"><b>Kostenart Heizöl</b><span>leer = nach Einkauf abrechnen</span></div>
       <div><select data-ent="properties" data-id="${p.id}" data-f="oil_category_id">${[["", "– nach Einkauf –"], ...p.categories.filter((c) => c.heating).map((c) => [c.id, `${c.grp} · ${c.name}`])]
@@ -464,13 +464,18 @@ async function drawStock(p) {
         value="${r.liters ?? ""}" title="${r.kind === "lieferung" ? "gelieferte Liter" : "Tankstand"}" placeholder="${r.kind === "lieferung" ? "geliefert" : "Tankstand"}">` },
     { f: "price", label: "CHF / 100 l", type: "static", w: "130px", render: (r) => r.kind === "lieferung"
         ? `<span class="muted small">${r.unit_price != null ? n2(r.unit_price) : "–"}</span>`
-        : `<input data-ent="heating-stock" data-id="${r.id}" data-f="price" type="number" step="any" value="${r.price ?? ""}" placeholder="${r.price_used != null ? "Ø " + n2(r.price_used) : "z.B. 114.90"}">` },
+        : r.price_source === "Durchschnitt"
+          ? `<b class="small">${n2(r.price_used)}</b> <span class="muted small">Ø${r.price != null && Math.abs(r.price - r.price_used) > 0.005 ? ` (erfasst ${n2(r.price)} nicht verwendet)` : ""}</span>`
+          : `<input data-ent="heating-stock" data-id="${r.id}" data-f="price" type="number" step="any" value="${r.price ?? ""}" placeholder="Preis Anfangsbestand" title="Nur nötig, solange noch kein Durchschnitt aus Lieferungen berechnet werden kann">` },
     { f: "amount", label: "Betrag CHF", type: "static", w: "120px", render: (r) => r.kind === "lieferung"
         ? `<input data-ent="heating-stock" data-id="${r.id}" data-f="amount" type="number" step="any" value="${r.amount ?? ""}" placeholder="Rechnung">`
         : `<span class="muted small">${r.price_used != null ? fmt(r.liters * r.price_used / 100) : ""}</span>` },
     { f: "avg", label: "Ø Tankinhalt", type: "static", w: "150px", render: (r) => `<span class="small">${r.avg_price != null ? n2(r.avg_price) + " / 100 l" : "–"}</span>
         ${r.kind === "ablesung" && r.consumed > 0 ? `<br><span class="muted small">Verbrauch seit letzter Ablesung ${fmtN(r.consumed)} l</span>` : ""}` },
     { f: "note", label: "Notiz", ph: "z.B. Ablesung Periodenende" }], { add: false });
+  const last = rows.find((r) => r.avg_price != null);
+  box.insertAdjacentHTML("afterbegin", last ? `<p class="small" style="margin:4px 0 8px">Aktueller Durchschnittspreis Tankinhalt: <b>${n2(last.avg_price)} CHF / 100 l</b> <span class="muted">(Stand ${fmtDate(last.date)})</span></p>`
+    : `<p class="small neg" style="margin:4px 0 8px">Noch kein Durchschnitt: erste Ablesung mit Preis (Anfangsbestand) oder eine Lieferung mit Liter <b>und</b> Betrag erfassen.</p>`);
   box.insertAdjacentHTML("beforeend", `<div class="row"><button class="linkbtn" data-add="heating-stock" data-kind="ablesung">+ Ablesung</button>
     <button class="linkbtn" data-add="heating-stock" data-kind="lieferung">+ Lieferung</button></div>`);
 }

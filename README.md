@@ -256,7 +256,7 @@ Tankstand (Liter, Preis pro 100 l) zu Beginn und Ende der Periode erfassen – b
 Zwischenabrechnung. Dann rechnet die App Anfangsbestand + Einkäufe − Endbestand statt der Einkäufe.
 Zusätzlich lassen sich **Lieferungen** (Datum, Liter, Betrag) erfassen: Daraus berechnet die App den gleitenden
 **Durchschnittspreis pro 100 l** des Tankinhalts – (Restwert + Lieferungen) ÷ (Restmenge + gelieferte Liter). Bei einer
-Ablesung ohne Preis gilt dieser Durchschnitt. Sind Lieferungen erfasst, ersetzen sie die Heizöl-Belege in der Abrechnung.
+Ablesung gilt dieser Durchschnitt; ein erfasster Preis zählt nur für den Anfangsbestand (solange noch kein Durchschnitt da ist). Sind Lieferungen erfasst, ersetzen sie die Heizöl-Belege in der Abrechnung.
 
 So wird gerechnet: Anteil = Betrag × Schlüssel der Wohnung × Nutzungstage ÷ Periodentage. Individuell belastete
 Positionen zählen voll, wenn sie in die Mietdauer fallen. Den Anteil von Leerständen trägt der Eigentümer.

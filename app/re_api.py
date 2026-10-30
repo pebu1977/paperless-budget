@@ -447,8 +447,9 @@ def _akonto(tenancy: Optional[dict], p0: date, p1: date) -> tuple[float, float]:
 
 def oil_ledger(pid: int) -> list[dict]:
     """Heizöl-Lager chronologisch mit gleitendem Durchschnittspreis.
-    Ablesung = Tankstand (Preis optional), Lieferung = gelieferte Liter + Betrag. Fehlt bei einer Ablesung der Preis,
-    gilt der Durchschnittspreis des Tankinhalts: (Restwert + Lieferungen) / (Restmenge + gelieferte Liter).
+    Ablesung = Tankstand, Lieferung = gelieferte Liter + Betrag. Bewertet wird mit dem Durchschnittspreis des Tankinhalts:
+    (Restwert + Lieferungen) / (Restmenge + gelieferte Liter). Ein bei der Ablesung erfasster Preis zählt nur, solange
+    noch kein Durchschnitt berechnet werden kann (Anfangsbestand).
     Am gleichen Tag zählt die Ablesung vor der Lieferung."""
     with core.db() as con:
         rows = [dict(r) for r in con.execute("SELECT * FROM heating_stock WHERE property_id = ?", (pid,))]
@@ -469,10 +470,10 @@ def oil_ledger(pid: int) -> list[dict]:
             r["avg_price"] = rx.r2(value / level * 100) if value is not None and level else None
             continue
         avg = (value / level * 100) if value is not None and level else None
-        if r["price"] is not None:
-            r["price_used"], r["price_source"] = r["price"], "erfasst"
-        elif avg is not None:
+        if avg is not None:
             r["price_used"], r["price_source"] = rx.r2(avg), "Durchschnitt"
+        elif r["price"] is not None:
+            r["price_used"], r["price_source"] = r["price"], "erfasst"
         else:
             r["price_used"], r["price_source"] = None, None
         r["consumed"] = rx.r2(level - liters) if level is not None else None
