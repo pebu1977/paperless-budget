@@ -181,6 +181,14 @@ $("#reBody").addEventListener("change", async (e) => {
   if (e.target.id === "stPick") { RE.stSel = e.target.value; renderRE(); }
 });
 $("#reBody").addEventListener("click", async (e) => {
+  const oa = e.target.closest("[data-oiladd]");
+  if (oa) {
+    e.preventDefault();
+    await api("/api/re/heating-stock", { method: "POST", body: JSON.stringify({ property_id: reProp().id, date: oa.dataset.oiladd, liters: 0, kind: "ablesung" }) });
+    toast("Ablesung angelegt – Tankstand eintragen"); RE.sub = "setup"; await renderRE();
+    document.querySelector("#stockTable")?.closest(".card")?.scrollIntoView({ behavior: "smooth" });
+    return;
+  }
   const del = e.target.closest(".lc-del");
   if (del) {
     const l = RE.costs.lines.find((x) => x.key === del.closest("tr").dataset.key);
@@ -297,7 +305,8 @@ async function reStatement(p) {
       <div class="cardhead"><h3>Vorschau</h3><select id="stPick">${opts.map(([k, t]) => `<option value="${k}" ${k === RE.stSel ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>
       <div class="muted">${st.interim ? "<b>Zwischenabrechnung</b> · " : ""}${esc(st.unit.name)} · ${fmtDate(st.stay[0])} – ${fmtDate(st.stay[1])} · ${st.days} von ${st.days_total} Tagen</div>
       ${st.oil ? `<div class="muted small" style="margin-top:4px">🛢 Heizöl ${st.oil.complete ? `nach Verbrauch: ${fmtN(st.oil.liters)} Liter = ${fmt(st.oil.amount)} (Bestand ${fmtDate(st.oil.start.date)} → ${fmtDate(st.oil.end.date)}, Einkäufe aus ${st.oil.source === "Lieferungen" ? "erfassten Lieferungen" : "Belegen"}, Ø ${st.oil.price ?? "–"} / 100 l)`
-        : `<span class="neg">nach Einkauf – ${st.oil.missing_price ? "Preis zur Tankstand-Ablesung fehlt (Preis erfassen oder Lieferungen mit Betrag erfassen)" : `Tankstand-Ablesung ${!st.oil.start ? "zum Beginn" : "zum Ende"} der Periode fehlt`} (Einrichtung → Heizöl-Lagerbestand)</span>`}</div>` : ""}
+        : `<span class="neg">nach Einkauf – ${st.oil.missing_price ? "Preis zur Tankstand-Ablesung fehlt (Preis erfassen oder Lieferungen mit Betrag erfassen)" : `Tankstand-Ablesung ${!st.oil.start ? `zum Beginn (um den ${fmtDate(st.oil.need_start)}, ±20 Tage)` : `zum Ende (um den ${fmtDate(st.oil.need_end)}, ±20 Tage)`} der Periode fehlt${st.oil.readings?.length ? ` – erfasst: ${st.oil.readings.slice(-4).map(fmtDate).join(", ")}` : " – noch keine Ablesung erfasst"}`}
+          <a href="#" data-oiladd="${!st.oil.start ? st.oil.need_start : st.oil.need_end}">Ablesung zu diesem Datum erfassen</a></span>`}</div>` : ""}
       ${(st.meters || []).map((m) => `<div class="muted small" style="margin-top:4px">⚡ Zähler ${esc(m.name)} (allgemein): ${m.quantity != null
         ? `${fmtN(m.quantity)} ${esc(m.unit)} in der Periode${m.amount != null ? `, erwartet ca. <b>${fmt(m.amount)}</b>` : ""}
            (Stand ${fmtDate(m.start[0].slice(0, 10))} → ${fmtDate(m.end[0].slice(0, 10))}${m.estimated ? ", Ende hochgerechnet" : ""})${m.category ? ` – steht in Klammern bei „${esc(m.category)}“` : " – keine NK-Kategorie zugeordnet (Zähler → Einstellungen)"}, abgerechnet wird nach Rechnungen`

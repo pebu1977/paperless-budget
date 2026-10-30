@@ -503,7 +503,9 @@ def _oil(p: dict, p0: date, p1: date, lines: list[dict]) -> tuple[list[dict], Op
     start, end = _reading(p["id"], p0), _reading(p["id"], p1 + timedelta(days=1)) or _reading(p["id"], p1)
     buys = [l for l in lines if l["category_id"] == cid and not l.get("unit_id")]
     manual = [r for r in oil_ledger(p["id"]) if r["kind"] == "lieferung"]
-    info = {"category_id": cid, "start": start, "end": end, "complete": bool(start and end), "source": "Belege"}
+    info = {"category_id": cid, "start": start, "end": end, "complete": bool(start and end), "source": "Belege",
+            "need_start": p0.isoformat(), "need_end": p1.isoformat(),
+            "readings": [r["date"] for r in oil_ledger(p["id"]) if r["kind"] == "ablesung"]}
     if manual and start and end:
         # erfasste Lieferungen zwischen den Ablesungen ersetzen die Heizöl-Belege (sonst doppelt)
         inside = [r for r in manual if start["date"] <= r["date"] < end["date"]]
