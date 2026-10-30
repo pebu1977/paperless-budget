@@ -6,6 +6,7 @@ Ausgaben = Paperless-Dokumente mit gesetztem Custom Field (monetary, Standard "T
 Kategorien = Paperless-Tags, die in den Einstellungen als Budget-Kategorie markiert sind.
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -48,7 +49,7 @@ TRACCAR_PASSWORD = os.environ.get("TRACCAR_PASSWORD", "")
 TRACCAR_VERIFY_SSL = os.environ.get("TRACCAR_VERIFY_SSL", "true").lower() != "false"  # Rechnung darf so viele Tage NACH der Zahlung datiert sein
 
 STATIC_DIR = Path(__file__).parent / "static"
-APP_VERSION = "2026.10.25"
+APP_VERSION = "2026.10.30"
 DOC_FIELDS = "id,title,created,correspondent,document_type,tags,custom_fields"
 DEFAULT_SETTINGS = {
     "category_tag_ids": [],         # Reihenfolge = Priorität, falls ein Dokument mehrere Kategorie-Tags hat
@@ -2865,4 +2866,47 @@ app.include_router(meters_api.router)
 app.add_event_handler("startup", meters_api.start_poller)
 
 # ---------------------------------------------------------------- Frontend
+# Cache-Busting: Skripte/Styles mit ?v=<Prüfsumme> einbinden, HTML nie zwischenspeichern – sonst liefert ein
+# Reverse-Proxy mit Asset-Cache (z.B. Nginx Proxy Manager „Cache Assets“) nach einem Update alte Dateien aus.
+def _asset_version() -> str:
+    h = hashlib.sha1(APP_VERSION.encode())
+    for f in sorted(STATIC_DIR.glob("*")):
+        if f.suffix in (".js", ".css", ".html"):
+            h.update(f.name.encode()); h.update(f.read_bytes())
+    return h.hexdigest()[:10]
+
+
+ASSET_V = _asset_version()
+_ASSET_RE = re.compile(r'((?:src|href)=")([\w.-]+\.(?:js|css))(")')
+NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
+
+
+def _html(name: str) -> Response:
+    text = (STATIC_DIR / name).read_text(encoding="utf-8")
+    return Response(_ASSET_RE.sub(rf"\g<1>\g<2>?v={ASSET_V}\g<3>", text), media_type="text/html; charset=utf-8", headers=NO_CACHE)
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def index_page():
+    return _html("index.html")
+
+
+@app.get("/login.html", include_in_schema=False)
+def login_page():
+    return _html("login.html")
+
+
+@app.middleware("http")
+async def static_cache_headers(request: Request, call_next):
+    resp = await call_next(request)
+    path = request.url.path
+    if path.endswith((".js", ".css")):
+        # versionierte Dateien dürfen lange im Cache bleiben, unversionierte immer neu prüfen
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable" if request.query_params.get("v") else "no-cache"
+    elif path.endswith(".webmanifest") or path.endswith(".html"):
+        resp.headers.update(NO_CACHE)
+    return resp
+
+
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
