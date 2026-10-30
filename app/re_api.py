@@ -30,7 +30,8 @@ with core.db() as _con:
         );
         """
     )
-    for _t, _c, _ty in [("properties", "oil_category_id", "INTEGER"), ("nk_statements", "interim", "INTEGER")]:
+    for _t, _c, _ty in [("properties", "oil_category_id", "INTEGER"), ("nk_statements", "interim", "INTEGER"),
+                        ("heating_stock", "kind", "TEXT"), ("heating_stock", "amount", "REAL")]:
         if _c not in {r["name"] for r in _con.execute(f"PRAGMA table_info({_t})")}:
             _con.execute(f"ALTER TABLE {_t} ADD COLUMN {_c} {_ty}")
 FILES_DIR = Path(os.environ.get("FILES_DIR", str(Path(core.DB_PATH).parent / "abrechnungen")))
@@ -45,7 +46,7 @@ ENT: dict[str, tuple[str, list[str]]] = {
     "tenancies": ("tenancies", ["unit_id", "tenant_name", "tenant_address", "salutation", "start", "end", "rent", "akonto", "match_text"]),
     "fixed-costs": ("fixed_costs", ["property_id", "category_id", "unit_id", "name", "amount", "interval", "valid_from", "valid_to"]),
     "manual-costs": ("manual_costs", ["property_id", "category_id", "unit_id", "date", "description", "amount", "quantity"]),
-    "heating-stock": ("heating_stock", ["property_id", "date", "liters", "price", "note"]),
+    "heating-stock": ("heating_stock", ["property_id", "date", "liters", "price", "note", "kind", "amount"]),
     "projects": ("projects", ["name", "budget", "tag_id", "status", "exclude_from_budget", "start", "end", "note"]),
 }
 
@@ -444,10 +445,51 @@ def _akonto(tenancy: Optional[dict], p0: date, p1: date) -> tuple[float, float]:
     return received, expected
 
 
-def _reading(pid: int, d: date, tol: int = 20) -> Optional[dict]:
-    """Tankstand-Ablesung am nächsten zum Stichtag (höchstens `tol` Tage daneben)."""
+def oil_ledger(pid: int) -> list[dict]:
+    """Heizöl-Lager chronologisch mit gleitendem Durchschnittspreis.
+    Ablesung = Tankstand (Preis optional), Lieferung = gelieferte Liter + Betrag. Fehlt bei einer Ablesung der Preis,
+    gilt der Durchschnittspreis des Tankinhalts: (Restwert + Lieferungen) / (Restmenge + gelieferte Liter).
+    Am gleichen Tag zählt die Ablesung vor der Lieferung."""
     with core.db() as con:
         rows = [dict(r) for r in con.execute("SELECT * FROM heating_stock WHERE property_id = ?", (pid,))]
+    rows.sort(key=lambda r: (r["date"], 0 if (r.get("kind") or "ablesung") == "ablesung" else 1, r["id"]))
+    level, value = None, None          # Liter im Tank, Wert in CHF (None = unbekannt)
+    for r in rows:
+        r["kind"] = r.get("kind") or "ablesung"
+        liters = float(r["liters"] or 0)
+        if r["kind"] == "lieferung":
+            amt = r.get("amount")
+            r["unit_price"] = rx.r2(amt / liters * 100) if amt and liters else None
+            if level is None:
+                level, value = 0.0, 0.0
+            if value is None and r["unit_price"] and level is not None:
+                value = level * r["unit_price"] / 100      # Restbestand ohne Preis: zum Lieferpreis bewerten
+            level += liters
+            value = value + amt if value is not None and amt is not None else None
+            r["avg_price"] = rx.r2(value / level * 100) if value is not None and level else None
+            continue
+        avg = (value / level * 100) if value is not None and level else None
+        if r["price"] is not None:
+            r["price_used"], r["price_source"] = r["price"], "erfasst"
+        elif avg is not None:
+            r["price_used"], r["price_source"] = rx.r2(avg), "Durchschnitt"
+        else:
+            r["price_used"], r["price_source"] = None, None
+        r["consumed"] = rx.r2(level - liters) if level is not None else None
+        level = liters
+        value = liters * r["price_used"] / 100 if r["price_used"] is not None else None
+        r["avg_price"] = r["price_used"]
+    return rows
+
+
+@router.get("/api/properties/{pid}/oil-ledger")
+def get_oil_ledger(pid: int):
+    return sorted(oil_ledger(pid), key=lambda r: (r["date"], r["id"]), reverse=True)
+
+
+def _reading(pid: int, d: date, tol: int = 20) -> Optional[dict]:
+    """Tankstand-Ablesung am nächsten zum Stichtag (höchstens `tol` Tage daneben), Preis ggf. als Durchschnitt."""
+    rows = [r for r in oil_ledger(pid) if r["kind"] == "ablesung"]
     best = min(rows, key=lambda r: abs((date.fromisoformat(r["date"]) - d).days), default=None)
     return best if best and abs((date.fromisoformat(best["date"]) - d).days) <= tol else None
 
@@ -459,9 +501,24 @@ def _oil(p: dict, p0: date, p1: date, lines: list[dict]) -> tuple[list[dict], Op
         return lines, None
     start, end = _reading(p["id"], p0), _reading(p["id"], p1 + timedelta(days=1)) or _reading(p["id"], p1)
     buys = [l for l in lines if l["category_id"] == cid and not l.get("unit_id")]
-    info = {"category_id": cid, "start": start, "end": end, "complete": bool(start and end),
-            "purchases": {"liters": rx.r2(sum(l.get("quantity") or 0 for l in buys)), "amount": rx.r2(sum(l["amount"] for l in buys)),
-                          "count": len(buys)}}
+    manual = [r for r in oil_ledger(p["id"]) if r["kind"] == "lieferung"]
+    info = {"category_id": cid, "start": start, "end": end, "complete": bool(start and end), "source": "Belege"}
+    if manual and start and end:
+        # erfasste Lieferungen zwischen den Ablesungen ersetzen die Heizöl-Belege (sonst doppelt)
+        inside = [r for r in manual if start["date"] <= r["date"] < end["date"]]
+        info["source"] = "Lieferungen"
+        info["purchases"] = {"liters": rx.r2(sum(r["liters"] or 0 for r in inside)), "amount": rx.r2(sum(r["amount"] or 0 for r in inside)),
+                             "count": len(inside), "items": [{"date": r["date"], "liters": r["liters"], "amount": r["amount"],
+                                                              "unit_price": r["unit_price"]} for r in inside]}
+    else:
+        info["purchases"] = {"liters": rx.r2(sum(l.get("quantity") or 0 for l in buys)), "amount": rx.r2(sum(l["amount"] for l in buys)),
+                             "count": len(buys)}
+    for r in (start, end):
+        if r:
+            r["price"] = r.get("price_used")
+    if start and end and (start["price"] is None or end["price"] is None):
+        info["complete"] = False
+        info["missing_price"] = True
     if not info["complete"]:
         return lines, info
     val = lambda r: rx.r2((r["liters"] or 0) * (r["price"] or 0) / 100)

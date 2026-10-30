@@ -162,7 +162,8 @@ $("#reBody").addEventListener("change", async (e) => {
     } catch (err) { toast(err.message, true); }
     return;
   }
-  if (e.target.dataset.ent) { await reSaveField(e.target); if (["units", "keys"].includes(e.target.dataset.ent) || e.target.dataset.f === "type") renderRE(); return; }
+  if (e.target.dataset.ent) { await reSaveField(e.target); if (["units", "keys"].includes(e.target.dataset.ent) || e.target.dataset.f === "type") renderRE();
+    if (e.target.dataset.ent === "heating-stock") drawStock(reProp()); return; }
   if (e.target.classList.contains("share")) {
     const k = e.target.dataset.key, inputs = [...document.querySelectorAll(`input.share[data-key="${k}"]`)];
     const shares = Object.fromEntries(inputs.map((i) => [i.dataset.unit, num(i.value)]));
@@ -199,7 +200,7 @@ $("#reBody").addEventListener("click", async (e) => {
       tenancies: { unit_id: p.units[0]?.id, tenant_name: "Neue Mieterin / neuer Mieter", start: today, rent: 0, akonto: 0 },
       "fixed-costs": { property_id: p.id, category_id: p.categories[0]?.id, name: "Fixkosten", amount: 0, interval: "jahr" },
       "manual-costs": { property_id: p.id, category_id: p.categories[0]?.id, date: today, description: "Manuelle Kosten", amount: 0 },
-      "heating-stock": { property_id: p.id, date: today, liters: 0 },
+      "heating-stock": { property_id: p.id, date: today, liters: 0, kind: e.target.dataset.kind || "ablesung" },
     }[add];
     if (!defaults) return;
     if ((add === "tenancies" && !p.units.length) || (["fixed-costs", "manual-costs"].includes(add) && !p.categories.length)) {
@@ -295,8 +296,8 @@ async function reStatement(p) {
     <div class="card pv">
       <div class="cardhead"><h3>Vorschau</h3><select id="stPick">${opts.map(([k, t]) => `<option value="${k}" ${k === RE.stSel ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>
       <div class="muted">${st.interim ? "<b>Zwischenabrechnung</b> · " : ""}${esc(st.unit.name)} · ${fmtDate(st.stay[0])} – ${fmtDate(st.stay[1])} · ${st.days} von ${st.days_total} Tagen</div>
-      ${st.oil ? `<div class="muted small" style="margin-top:4px">🛢 Heizöl ${st.oil.complete ? `nach Verbrauch: ${fmtN(st.oil.liters)} Liter = ${fmt(st.oil.amount)} (Bestand ${fmtDate(st.oil.start.date)} → ${fmtDate(st.oil.end.date)})`
-        : `<span class="neg">nach Einkauf – Tankstand-Ablesung ${!st.oil.start ? "zum Beginn" : "zum Ende"} der Periode fehlt (Einrichtung → Heizöl-Lagerbestand)</span>`}</div>` : ""}
+      ${st.oil ? `<div class="muted small" style="margin-top:4px">🛢 Heizöl ${st.oil.complete ? `nach Verbrauch: ${fmtN(st.oil.liters)} Liter = ${fmt(st.oil.amount)} (Bestand ${fmtDate(st.oil.start.date)} → ${fmtDate(st.oil.end.date)}, Einkäufe aus ${st.oil.source === "Lieferungen" ? "erfassten Lieferungen" : "Belegen"}, Ø ${st.oil.price ?? "–"} / 100 l)`
+        : `<span class="neg">nach Einkauf – ${st.oil.missing_price ? "Preis zur Tankstand-Ablesung fehlt (Preis erfassen oder Lieferungen mit Betrag erfassen)" : `Tankstand-Ablesung ${!st.oil.start ? "zum Beginn" : "zum Ende"} der Periode fehlt`} (Einrichtung → Heizöl-Lagerbestand)</span>`}</div>` : ""}
       ${(st.meters || []).map((m) => `<div class="muted small" style="margin-top:4px">⚡ Zähler ${esc(m.name)} (allgemein): ${m.quantity != null
         ? `${fmtN(m.quantity)} ${esc(m.unit)} in der Periode${m.amount != null ? `, erwartet ca. <b>${fmt(m.amount)}</b>` : ""}
            (Stand ${fmtDate(m.start[0].slice(0, 10))} → ${fmtDate(m.end[0].slice(0, 10))}${m.estimated ? ", Ende hochgerechnet" : ""})${m.category ? ` – steht in Klammern bei „${esc(m.category)}“` : " – keine NK-Kategorie zugeordnet (Zähler → Einstellungen)"}, abgerechnet wird nach Rechnungen`
@@ -410,8 +411,10 @@ function reSetup(p) {
       { f: "keywords", label: "Stichworte", ph: "heizöl, brennstoff" }])}</div>
 
   <div class="card"><h3>Heizöl-Lagerbestand</h3>
-    <p class="muted small">Optional: Heizöl nach <b>Verbrauch</b> abrechnen statt nach Einkauf – Anfangsbestand + Einkäufe − Endbestand.
-      Dafür den Tankstand zu Beginn und Ende der Periode (bzw. am Stichtag einer Zwischenabrechnung) erfassen.</p>
+    <p class="muted small">Optional: Heizöl nach <b>Verbrauch</b> abrechnen statt nach Einkauf – Anfangsbestand + Lieferungen − Endbestand.
+      Dafür den Tankstand zu Beginn und Ende der Periode (bzw. am Stichtag einer Zwischenabrechnung) erfassen. <b>Lieferungen</b> mit Litern und
+      Betrag erfassen – daraus rechnet die App den Durchschnittspreis pro 100 l des Tankinhalts; bei Ablesungen ohne Preis gilt dieser.
+      Sind Lieferungen erfasst, ersetzen sie die Heizöl-Belege in der Abrechnung.</p>
     <div class="field"><div class="lbl"><b>Kostenart Heizöl</b><span>leer = nach Einkauf abrechnen</span></div>
       <div><select data-ent="properties" data-id="${p.id}" data-f="oil_category_id">${[["", "– nach Einkauf –"], ...p.categories.filter((c) => c.heating).map((c) => [c.id, `${c.grp} · ${c.name}`])]
         .map(([k, l]) => `<option value="${k}" ${String(k) === String(p.oil_category_id ?? "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div></div>
@@ -439,11 +442,7 @@ function reSetup(p) {
   <div class="card" id="manualCard"><h3>Manuelle Kosten</h3>
     <p class="muted small">Einzelne Kosten ohne Paperless-Beleg (z.B. Eigenleistung, abgelesener Betrag). Datum bestimmt die Periode.</p>
     <div id="manualTable">…</div></div>`;
-  api(`/api/re/heating-stock?property_id=${p.id}`).then((rows) => {
-    $("#stockTable").innerHTML = etable("heating-stock", rows.sort((a, b) => b.date.localeCompare(a.date)), [
-      { f: "date", label: "Ablesung am", type: "date", w: "150px" }, { f: "liters", label: "Tankstand Liter", type: "number", w: "140px" },
-      { f: "price", label: "Preis CHF / 100 l", type: "number", w: "140px", ph: "z.B. 114.90" }, { f: "note", label: "Notiz", ph: "z.B. Ablesung Periodenende" }]);
-  });
+  drawStock(p);
   api(`/api/re/manual-costs?property_id=${p.id}`).then((rows) => {
     $("#manualTable").innerHTML = etable("manual-costs", rows.sort((a, b) => b.date.localeCompare(a.date)), [
       { f: "date", label: "Datum", type: "date", w: "130px" }, { f: "description", label: "Bezeichnung" },
@@ -452,6 +451,28 @@ function reSetup(p) {
       { f: "quantity", label: "Menge", type: "number", w: "90px" }, { f: "amount", label: "Betrag", type: "number", w: "100px" }]);
     if (RE.setupFocus) { $(RE.setupFocus === "manual" ? "#manualCard" : "#fixedCard").scrollIntoView({ behavior: "smooth" }); RE.setupFocus = null; }
   });
+}
+
+async function drawStock(p) {
+  const rows = await api(`/api/properties/${p.id}/oil-ledger`);
+  const box = $("#stockTable"); if (!box) return;
+  const n2 = (v) => (v == null ? "–" : Number(v).toFixed(2));
+  box.innerHTML = etable("heating-stock", rows, [
+    { f: "kind", label: "Art", type: "select", options: () => [["ablesung", "Ablesung"], ["lieferung", "Lieferung"]], w: "120px" },
+    { f: "date", label: "Datum", type: "date", w: "140px" },
+    { f: "liters", label: "Liter", type: "static", w: "120px", render: (r) => `<input data-ent="heating-stock" data-id="${r.id}" data-f="liters" type="number" step="any"
+        value="${r.liters ?? ""}" title="${r.kind === "lieferung" ? "gelieferte Liter" : "Tankstand"}" placeholder="${r.kind === "lieferung" ? "geliefert" : "Tankstand"}">` },
+    { f: "price", label: "CHF / 100 l", type: "static", w: "130px", render: (r) => r.kind === "lieferung"
+        ? `<span class="muted small">${r.unit_price != null ? n2(r.unit_price) : "–"}</span>`
+        : `<input data-ent="heating-stock" data-id="${r.id}" data-f="price" type="number" step="any" value="${r.price ?? ""}" placeholder="${r.price_used != null ? "Ø " + n2(r.price_used) : "z.B. 114.90"}">` },
+    { f: "amount", label: "Betrag CHF", type: "static", w: "120px", render: (r) => r.kind === "lieferung"
+        ? `<input data-ent="heating-stock" data-id="${r.id}" data-f="amount" type="number" step="any" value="${r.amount ?? ""}" placeholder="Rechnung">`
+        : `<span class="muted small">${r.price_used != null ? fmt(r.liters * r.price_used / 100) : ""}</span>` },
+    { f: "avg", label: "Ø Tankinhalt", type: "static", w: "150px", render: (r) => `<span class="small">${r.avg_price != null ? n2(r.avg_price) + " / 100 l" : "–"}</span>
+        ${r.kind === "ablesung" && r.consumed > 0 ? `<br><span class="muted small">Verbrauch seit letzter Ablesung ${fmtN(r.consumed)} l</span>` : ""}` },
+    { f: "note", label: "Notiz", ph: "z.B. Ablesung Periodenende" }], { add: false });
+  box.insertAdjacentHTML("beforeend", `<div class="row"><button class="linkbtn" data-add="heating-stock" data-kind="ablesung">+ Ablesung</button>
+    <button class="linkbtn" data-add="heating-stock" data-kind="lieferung">+ Lieferung</button></div>`);
 }
 
 // ------------------------------------------------------------ Projekte

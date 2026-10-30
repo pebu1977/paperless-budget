@@ -254,6 +254,9 @@ deren Vorzeichen nicht über den Saldo bestätigt werden konnte, sind als „ung
 **Heizöl nach Verbrauch:** In der Einrichtung unter *Heizöl-Lagerbestand* die Kostenart Heizöl wählen und den
 Tankstand (Liter, Preis pro 100 l) zu Beginn und Ende der Periode erfassen – bzw. am Stichtag einer
 Zwischenabrechnung. Dann rechnet die App Anfangsbestand + Einkäufe − Endbestand statt der Einkäufe.
+Zusätzlich lassen sich **Lieferungen** (Datum, Liter, Betrag) erfassen: Daraus berechnet die App den gleitenden
+**Durchschnittspreis pro 100 l** des Tankinhalts – (Restwert + Lieferungen) ÷ (Restmenge + gelieferte Liter). Bei einer
+Ablesung ohne Preis gilt dieser Durchschnitt. Sind Lieferungen erfasst, ersetzen sie die Heizöl-Belege in der Abrechnung.
 
 So wird gerechnet: Anteil = Betrag × Schlüssel der Wohnung × Nutzungstage ÷ Periodentage. Individuell belastete
 Positionen zählen voll, wenn sie in die Mietdauer fallen. Den Anteil von Leerständen trägt der Eigentümer.
